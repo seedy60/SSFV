@@ -23,6 +23,7 @@ struct Field {
     uintptr_t group = 0;  // the container holding the group of buttons
     uintptr_t panel = 0;  // that container's parent, which holds the question
     std::vector<uintptr_t> chain;  // the field, then each parent to the root
+    std::vector<uintptr_t> hiddenBy;  // ancestors whose visible bit is clear
 
     bool gold() const;   // the game's selection tint, RGB 255 227 140
     bool shown() const;  // on stage, attached, opaque enough, real text

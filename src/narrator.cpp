@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cwctype>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <set>
 #include <string>
@@ -58,6 +59,8 @@ std::wstring g_lastGridKey;
 std::wstring g_pendingStageKey;
 Clock::time_point g_pendingStageAt;
 std::wstring g_lastStageKey;
+Clock::time_point g_stageSelectSeen = Clock::time_point::min();
+bool g_stageMoved = false;
 float g_lastControllerX = -1.0f;
 float g_lastControllerY = -1.0f;
 bool g_storyGrid = false;
@@ -149,6 +152,46 @@ std::wstring keyFor(const Field& field) {
            std::to_wstring(static_cast<int>(field.y));
 }
 
+bool stageConditionLabel(const std::wstring& text, std::wstring& label) {
+    const size_t bar = text.find(L'|');
+    if (bar == std::wstring::npos) return false;
+    label = trim(text.substr(0, bar));
+    // Backing out of character select can leave the panel hidden with its
+    // values not filled in yet. The label is still the screen's marker.
+    return label == L"Weather" || label == L"Time" || label == L"Temperature";
+}
+
+// Steps from one object up to the nearest ancestor it shares with the other.
+// Stage select draws the stage name twice, the favourite on the left and the
+// one under the cursor beside the conditions. Tree distance picks the latter
+// without relying on a fixed position.
+int treeDistance(const std::vector<uintptr_t>& a, const std::vector<uintptr_t>& b) {
+    int best = std::numeric_limits<int>::max();
+    for (size_t i = 0; i < a.size(); ++i) {
+        for (size_t j = 0; j < b.size(); ++j) {
+            if (a[i] != b[j]) continue;
+            best = std::min(best, static_cast<int>(i + j));
+        }
+    }
+    return best;
+}
+
+bool stageNameSlot(const Field& field) {
+    // The stage name is drawn once as the large right-hand title and once at
+    // the left edge of the preview. Other ??? text is not the random stage.
+    return (field.x >= 1000.0f && field.x < 1400.0f && field.y >= 540.0f &&
+            field.y < 620.0f) ||
+           (field.x < 100.0f && field.y >= 480.0f && field.y < 540.0f);
+}
+
+bool randomStageName(const Field& field) {
+    return stageNameSlot(field) && trim(field.text) == L"???";
+}
+
+std::wstring stageNameLabel(const std::wstring& text) {
+    return trim(text) == L"???" ? L"Random stage" : text;
+}
+
 bool readingOrder(const Field& a, const Field& b) {
     const long ay = std::lround(a.y / 12.0f);
     const long by = std::lround(b.y / 12.0f);
@@ -156,14 +199,93 @@ bool readingOrder(const Field& a, const Field& b) {
     return a.x < b.x;
 }
 
+bool isCharacterSelect(const std::vector<Field>& shown);
+
 std::vector<Field> onScreen(const std::vector<Field>& fields) {
     std::vector<Field> shown;
     std::set<std::wstring> seen;
-    for (const auto& field : fields) {
-        if (!field.shown()) continue;
+    auto add = [&](const Field& field) {
+        if (!field.shown()) return;
         // A title drawn in three layers reads once.
-        if (!seen.insert(keyFor(field)).second) continue;
+        if (!seen.insert(keyFor(field)).second) return;
         shown.push_back(field);
+    };
+    for (const auto& field : fields) add(field);
+
+    // Stage select and character select are panels of one movie. Backing out
+    // of character select can leave stage select on screen while its
+    // container still has the visible bit clear, so every field above is
+    // filtered out and the narrator goes silent. Restore only the stage panel:
+    // the fields hidden by the same containers as its weather/time conditions,
+    // and no others. Conditions may still have empty values while hidden, so
+    // the label alone identifies them.
+    std::set<std::wstring> hiddenConditionLabels;
+    std::set<uintptr_t> stagePanels;
+    for (const auto& field : fields) {
+        if (!field.hidden || !field.rooted || field.chain.size() < 2) continue;
+        std::wstring label;
+        if (!stageConditionLabel(field.text, label)) continue;
+        hiddenConditionLabels.insert(label);
+        for (uintptr_t parent : field.hiddenBy) stagePanels.insert(parent);
+    }
+    // A hidden STAGE SELECT heading or random-stage title is the fallback when
+    // the conditions are not among the readable fields at all.
+    if (hiddenConditionLabels.size() < 2) {
+        for (const auto& field : fields) {
+            if (!field.hidden || !field.rooted || field.chain.size() < 2) continue;
+            if (trim(field.text) != L"STAGE SELECT" && !randomStageName(field)) continue;
+            for (uintptr_t parent : field.hiddenBy) stagePanels.insert(parent);
+        }
+    }
+    if (!stagePanels.empty()) {
+        const bool characterVisible = isCharacterSelect(shown);
+        bool stageVisible = false;
+        bool opaqueShown = false;
+        bool characterRemnant = false;
+        for (const auto& field : shown) {
+            const std::wstring text = trim(field.text);
+            if (field.tint[3] > 0.01f) opaqueShown = true;
+            if (text == L"STAGE SELECT") stageVisible = true;
+            if (randomStageName(field)) stageVisible = true;
+            std::wstring label;
+            if (stageConditionLabel(field.text, label)) stageVisible = true;
+            // These roster labels are left behind, faded, when character
+            // select closes. They identify the return to stage select even
+            // when a fighter name is the only other text on screen.
+            if (text == L"2nd" || text == L"LEADER" || text == L"YOU") {
+                characterRemnant = true;
+            }
+        }
+        // Character select leaves fighter names and labels visible with zero
+        // alpha after the stage panel comes back. They are not stage content,
+        // so they do not block restoring the hidden panel; an actual character
+        // select (heading or side badge) still does.
+        if (!characterVisible &&
+            (shown.empty() || stageVisible || !opaqueShown || characterRemnant)) {
+            for (const auto& field : fields) {
+                if (!field.hidden || !field.rooted || field.hiddenBy.empty()) continue;
+                bool inStagePanel = false;
+                for (uintptr_t object : field.chain) {
+                    if (stagePanels.count(object)) {
+                        inStagePanel = true;
+                        break;
+                    }
+                }
+                if (!inStagePanel) continue;
+                bool onlyStageHidden = true;
+                for (uintptr_t parent : field.hiddenBy) {
+                    if (!stagePanels.count(parent)) {
+                        onlyStageHidden = false;
+                        break;
+                    }
+                }
+                if (!onlyStageHidden) continue;
+                Field restored = field;
+                restored.hidden = false;
+                restored.hiddenBy.clear();
+                add(restored);
+            }
+        }
     }
     std::sort(shown.begin(), shown.end(), readingOrder);
     return shown;
@@ -246,9 +368,112 @@ bool worthAnnouncing(const std::wstring& text);
 // prompt's buttons to finish painting; on this screen the wait is what made
 // the name arrive a beat after the cursor. It is not a prompt, so it can use
 // the normal announcement delay.
+bool isCharacterSelectHeading(const std::wstring& text) {
+    return trim(text) == L"CHARACTER SELECT";
+}
+
+bool isPlayerBadge(const std::wstring& text) {
+    const std::wstring t = trim(text);
+    return t == L"1P" || t == L"2P";
+}
+
+bool isCpuBadge(const std::wstring& text) {
+    return trim(text) == L"CPU";
+}
+
+bool isSideBadge(const std::wstring& text) {
+    return isPlayerBadge(text) || isCpuBadge(text);
+}
+
 bool isCharacterSelect(const std::vector<Field>& shown) {
     for (const auto& field : shown) {
-        if (trim(field.text) == L"CHARACTER SELECT") return true;
+        if (isCharacterSelectHeading(field.text)) return true;
+        // The heading is not always in the readable set while the roster is
+        // repainting. The side badges belong to this screen alone, and unlike
+        // the heading they stay on screen throughout it.
+        if (field.y >= 700.0f && field.y < 1000.0f && isSideBadge(field.text)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// After player one is chosen, Training opens the same character-select movie
+// for the opponent. The CPU badge is dimmed on the P1 screen and bright once
+// the opponent is choosing. Its position moves with the roster row, so neither
+// its x nor its y can identify the screen; the active tint does.
+bool isOpponentSelect(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (!isCpuBadge(field.text)) continue;
+        if (field.tint[0] >= 0.9f && field.tint[1] >= 0.9f && field.tint[2] >= 0.9f) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Player one's fighter name is drawn on the left of the character-select
+// stage and the CPU's on the right. The CPU changes its pick on its own, and
+// backing out can leave that side's name on screen; it is not the character
+// the player is choosing. The CPU name sits at about x=932, so the old x=960
+// boundary let it through. This filter must not run on opponent select, where
+// the CPU-side name is exactly the choice being made.
+bool characterSelectCpuName(const Field& field) {
+    return field.x >= 700.0f && !FightReader::knownName(field.text).empty();
+}
+
+// The random tile is labelled "???" in a side panel. It has no letters, so the
+// ordinary worthAnnouncing filter drops it; recognise it here before that
+// filter runs. On P1 select only the left panel is the player's choice; on
+// opponent select the right panel is.
+bool isCharacterSelectRandom(const Field& field, bool opponentSelect) {
+    return trim(field.text) == L"???" && (field.x < 700.0f || opponentSelect);
+}
+
+// The random-select tile can also reach the reader as a bare player badge
+// while its "???" name is still painting. When that badge is the whole
+// selection, name the slot; when a fighter name is present, the badge is only
+// grid decoration. The CPU tag is always decoration: the fighter name is the
+// selection. Returns true when the result is only the random tile, so the
+// caller can wait for a fighter name that is still painting before saying it.
+bool characterSelectLabels(std::vector<std::wstring>& lines) {
+    if (lines.empty()) return false;
+    bool onlyBadges = true;
+    bool anyPlayerBadge = false;
+    bool anyRandom = false;
+    for (const auto& line : lines) {
+        const std::wstring t = trim(line);
+        if (isCharacterSelectHeading(t) || isCpuBadge(t)) {
+            // The heading and CPU tag accompany ordinary roster navigation;
+            // they must not turn a player badge into a random-tile call.
+            onlyBadges = false;
+            continue;
+        }
+        if (t == L"???") {
+            anyRandom = true;
+            onlyBadges = false;
+            continue;
+        }
+        if (isPlayerBadge(t)) {
+            anyPlayerBadge = true;
+            continue;
+        }
+        onlyBadges = false;
+    }
+    lines.erase(std::remove_if(lines.begin(), lines.end(), [](const std::wstring& line) {
+                     const std::wstring t = trim(line);
+                     return isCharacterSelectHeading(t) || isSideBadge(t) || t == L"???";
+                 }),
+                 lines.end());
+    if (anyRandom) {
+        if (std::find(lines.begin(), lines.end(), L"Random select") == lines.end()) {
+            lines.push_back(L"Random select");
+        }
+        return false;
+    }
+    if (onlyBadges && anyPlayerBadge) {
+        lines.push_back(L"Random select");
+        return true;
     }
     return false;
 }
@@ -876,74 +1101,121 @@ bool battleSettingsGrid(const std::vector<Field>& shown, std::wstring& line) {
 }
 
 bool isStageSelect(const std::vector<Field>& shown) {
+    // Two conditions identify the screen even while its heading blinks out
+    // during the stage-change transition.
+    std::set<std::wstring> labels;
     for (const auto& field : shown) {
         if (field.y < 200.0f && trim(field.text) == L"STAGE SELECT") return true;
+        if (randomStageName(field)) return true;
+        std::wstring label;
+        if (stageConditionLabel(field.text, label)) labels.insert(label);
     }
-    return false;
+    return labels.size() >= 2;
 }
 
-// The Versus stage select has no gold text. It shows the favourite stage on
-// the left, the stage under the cursor on the right, and its weather/time
-// below. Read the right-hand title and the detail fields; the left title stays
-// on the favourite and must not make every move look like a two-stage change.
+// Stage select has no gold text and no cursor field. It draws the stage name
+// twice, the favourite on the left and the one under the cursor beside the
+// conditions; the name nearest the conditions in the display tree is the one
+// being offered. Moving says just the name; Read All still gives the details.
 bool stageSelectLine(const std::vector<Field>& shown, std::wstring& line) {
     line.clear();
-    const Field* leftName = nullptr;
-    const Field* rightName = nullptr;
-    std::vector<const Field*> details;
+    std::set<std::wstring> labels;
+    std::vector<const Field*> conditions;
+    for (const auto& field : shown) {
+        std::wstring label;
+        if (!stageConditionLabel(field.text, label)) continue;
+        labels.insert(label);
+        conditions.push_back(&field);
+    }
+    bool random = false;
+    for (const auto& field : shown) {
+        if (randomStageName(field)) {
+            random = true;
+            break;
+        }
+    }
+    if (labels.size() < 2) {
+        // The random stage has no weather, time or temperature fields.
+        if (random) {
+            line = L"Random stage";
+            return true;
+        }
+        return false;
+    }
+
+    const Field* name = nullptr;
+    int nearest = std::numeric_limits<int>::max();
     for (const auto& field : shown) {
         const std::wstring text = trim(field.text);
         if (text.empty() || text == L"STAGE SELECT" || !worthAnnouncing(text)) continue;
-        if (field.x < 100.0f && field.y >= 480.0f && field.y < 540.0f) {
-            if (!leftName) leftName = &field;
-            continue;
-        }
-        if (field.x >= 1000.0f && field.x < 1400.0f && field.y >= 540.0f &&
-            field.y < 620.0f) {
-            if (!rightName) rightName = &field;
-            continue;
-        }
-        if (field.y >= 540.0f && field.y < 620.0f && field.x < 1000.0f) {
-            details.push_back(&field);
+        std::wstring ignored;
+        if (stageConditionLabel(text, ignored)) continue;
+        for (const Field* condition : conditions) {
+            const int distance = treeDistance(field.chain, condition->chain);
+            if (distance < nearest) {
+                nearest = distance;
+                name = &field;
+            }
         }
     }
-    const Field* name = rightName ? rightName : leftName;
     if (!name) return false;
-
-    std::sort(details.begin(), details.end(), [](const Field* a, const Field* b) {
-        return readingOrder(*a, *b);
-    });
-    std::vector<std::wstring> parts;
-    std::set<std::wstring> seen;
-    const std::wstring chosen = trim(name->text);
-    parts.push_back(chosen);
-    seen.insert(chosen);
-    for (const Field* field : details) {
-        const std::wstring text = trim(field->text);
-        if (seen.insert(text).second) parts.push_back(text);
-    }
-    line = join(parts);
+    line = stageNameLabel(trim(name->text));
     return !line.empty();
+}
+
+void clearStageSelectState() {
+    g_pendingStageKey.clear();
+    g_lastStageKey.clear();
+    g_stageMoved = false;
+    g_stageSelectSeen = Clock::time_point::min();
 }
 
 bool handleStageSelect(const std::vector<Field>& shown, Clock::time_point now) {
     if (!isStageSelect(shown)) {
-        // A later visit to the screen should announce its first stage again.
-        g_pendingStageKey.clear();
-        g_lastStageKey.clear();
+        // Character select is a different screen at once; clear so coming back
+        // announces the stage again. Otherwise hold through a one-poll hidden
+        // or repainted panel rather than clearing the line and repeating it.
+        if (isCharacterSelect(shown)) {
+            clearStageSelectState();
+            return false;
+        }
+        if (g_stageSelectSeen != Clock::time_point::min() &&
+            now - g_stageSelectSeen < std::chrono::milliseconds(750)) {
+            return true;
+        }
+        clearStageSelectState();
         return false;
     }
+    g_stageSelectSeen = now;
+
     std::wstring line;
-    if (!stageSelectLine(shown, line)) return true;
-    const std::wstring key = L"stage" + line;
+    if (!stageSelectLine(shown, line)) {
+        // The conditions can be up for a poll before the name paints. Hold the
+        // screen rather than falling through to generic text.
+        g_pendingStageKey.clear();
+        return true;
+    }
+    const std::wstring key = L"stage\x1f" + line;
     if (key != g_pendingStageKey) {
+        if (key != g_lastStageKey) g_stageMoved = true;
         g_pendingStageKey = key;
         g_pendingStageAt = now + std::chrono::milliseconds(g_config.announceDelayMs);
         return true;
     }
-    if (now < g_pendingStageAt || key == g_lastStageKey) return true;
-    if (!recentlySaid({line})) say({line}, true);
+    if (now < g_pendingStageAt) return true;
+    if (key == g_lastStageKey && !g_stageMoved) return true;
+
+    // Moving away and straight back is a real move even when it lands on the
+    // stage that was last spoken, so do not let the repeat guard swallow it.
+    const bool returned = key == g_lastStageKey;
+    if (!returned && recentlySaid({line})) {
+        g_lastStageKey = key;
+        g_stageMoved = false;
+        return true;
+    }
+    say({line}, true);
     g_lastStageKey = key;
+    g_stageMoved = false;
     g_pendingTexts.clear();
     return true;
 }
@@ -1042,6 +1314,17 @@ bool isPauseMenu(const std::vector<Field>& shown) {
 // fight's clock is on screen, so the menus are unaffected.
 void updateFight(const std::vector<Field>& shown) {
     if (isPauseMenu(shown)) {
+        radar::update(false);
+        return;
+    }
+    if (isStageSelect(shown)) {
+        // Stage select can carry character portraits and a stray number, but
+        // it is not a round. Clear any fight state so the menu reader is not
+        // suppressed by a clock it mistook for the HUD.
+        g_fightClock = -1;
+        g_lastTimer = -1;
+        g_playerName.clear();
+        g_timer99 = false;
         radar::update(false);
         return;
     }
@@ -1167,8 +1450,8 @@ void poll(std::vector<Field> shown) {
     if (shown.empty()) {
         g_previousShown.clear();
         g_pendingTexts.clear();
-        g_pendingStageKey.clear();
-        g_lastStageKey.clear();
+        // Keep stage select's keys until the screen is definitely gone. A
+        // hidden panel can produce an empty poll just before it is restored.
         return;
     }
 
@@ -1252,6 +1535,8 @@ void poll(std::vector<Field> shown) {
     // overlay, and its y falls between two rows. Leave that one item out; the
     // rows, the bottom actions and any confirmation dialog still read.
     const bool versusMode = isVersusModeScreen(shown);
+    const bool characterSelect = isCharacterSelect(shown);
+    const bool opponentSelect = characterSelect && isOpponentSelect(shown);
 
     std::vector<std::wstring> selected;
     std::set<std::wstring> selectedTexts;
@@ -1288,6 +1573,13 @@ void poll(std::vector<Field> shown) {
         }
         if (lit) {
             if (characterStory && g_storyGrid && isStoryTab(field)) continue;
+            // Character select's heading and CPU tag are labels on the screen,
+            // not the fighter under the cursor. Only the fighter name is read.
+            if (characterSelect &&
+                (isCharacterSelectHeading(field.text) || isCpuBadge(field.text))) {
+                continue;
+            }
+            if (characterSelect && !opponentSelect && characterSelectCpuName(field)) continue;
             if (!selectedField) selectedField = &field;
             // The screen draws each row's assigned button as a picture, so the
             // layout has to be read from the screen's game object. Its binding
@@ -1322,6 +1614,8 @@ void poll(std::vector<Field> shown) {
             break;
         }
     }
+    bool characterSelectRandomOnly = false;
+    if (characterSelect) characterSelectRandomOnly = characterSelectLabels(selected);
     std::vector<std::wstring> unavailable;
     if (!controllerSetting) {
         g_lastControllerX = -1.0f;
@@ -1567,7 +1861,14 @@ void poll(std::vector<Field> shown) {
                     logLine(L"menu selected: " + key);
                 }
                 g_pendingKey = key;
-                g_pendingAt = now + std::chrono::milliseconds(g_config.announceDelayMs);
+                // A badge-only poll can be the random tile, or it can be the
+                // player tag that paints a frame before a fighter's name. Give
+                // the name time to arrive before naming the random slot.
+                const int settle =
+                    (characterSelect && characterSelectRandomOnly)
+                        ? std::max(900, g_config.announceDelayMs)
+                        : g_config.announceDelayMs;
+                g_pendingAt = now + std::chrono::milliseconds(settle);
                 return;
             }
             // A prompt draws its question a moment after its first button.
@@ -1629,7 +1930,7 @@ void poll(std::vector<Field> shown) {
     // building itself is not read out one word at a time. A menu's footer is
     // skipped: it arrives a moment before the gold entry on the same screen,
     // and would otherwise be read alone and again with the entry.
-    const bool quickMenu = isCharacterSelect(shown) || isMainMenu(shown);
+    const bool quickMenu = characterSelect || isMainMenu(shown);
     const bool arcadePath = isArcadePathScreen(shown);
     for (const auto& field : shown) {
         if (field.y >= 960.0f && field.x < 400.0f) continue;
@@ -1641,7 +1942,24 @@ void poll(std::vector<Field> shown) {
             continue;
         }
         if (versusMode && trim(field.text) == L"Controller Settings") continue;
+        // The random tile's "???" is real content, but has no letters for the
+        // usual worthAnnouncing filter, so translate it before that filter.
+        // Only new text counts; otherwise an unchanged tile would be repeated
+        // after every poll.
+        if (characterSelect && isCharacterSelectRandom(field, opponentSelect)) {
+            if (std::find(appeared.begin(), appeared.end(), field.text) != appeared.end() &&
+                std::find(g_pendingTexts.begin(), g_pendingTexts.end(), L"Random select") ==
+                    g_pendingTexts.end()) {
+                g_pendingTexts.push_back(L"Random select");
+            }
+            continue;
+        }
         if (!worthAnnouncing(field.text)) continue;
+        // CPU, 1P and 2P are roster labels, not new screen text. The CPU's own
+        // fighter name is not the pick the player is making on the P1 screen,
+        // but it is the pick on opponent select.
+        if (characterSelect && isSideBadge(field.text)) continue;
+        if (characterSelect && !opponentSelect && characterSelectCpuName(field)) continue;
         if (std::find(appeared.begin(), appeared.end(), field.text) == appeared.end()) continue;
         if (std::find(g_pendingTexts.begin(), g_pendingTexts.end(), field.text) ==
             g_pendingTexts.end()) {
@@ -1674,15 +1992,7 @@ void poll(std::vector<Field> shown) {
     if (g_pendingTexts.empty() || now < g_pendingTextsAt) return;
     std::vector<std::wstring> lines = g_pendingTexts;
     g_pendingTexts.clear();
-    // "1P" and "2P" are badges on the character select grid. The character
-    // name is the useful part; the badge is only worth saying when it is the
-    // whole screen.
-    if (lines.size() > 1) {
-        lines.erase(std::remove_if(lines.begin(), lines.end(), [](const std::wstring& line) {
-                        return line == L"1P" || line == L"2P";
-                    }),
-                    lines.end());
-    }
+    if (characterSelect) characterSelectLabels(lines);
     if (lines.size() > 4) return;
     if (!recentlySaid(lines) && !recentlyCovered(lines)) say(lines, true);
     g_lastKey.clear();
@@ -1719,15 +2029,20 @@ void handle(Action action) {
         case Action::ReadAll: {
             auto shown = onScreen(g_reader.read());
             dropFaded(shown);
+            const bool characterSelect = isCharacterSelect(shown);
+            const bool stageSelect = isStageSelect(shown);
             std::vector<std::wstring> lines;
             std::set<std::wstring> seen;
             for (const auto& field : shown) {
                 if (hiddenStageOverlay(field.text) || copyrightNotice(field.text) ||
             tipCounter(field.text)) continue;
-                if (!seen.insert(field.text).second) continue;
-                lines.push_back(field.text);
+                std::wstring text = field.text;
+                if (stageSelect && randomStageName(field)) text = L"Random stage";
+                if (!seen.insert(text).second) continue;
+                lines.push_back(text);
                 if (lines.size() >= 60) break;
             }
+            if (characterSelect) characterSelectLabels(lines);
             if (lines.empty()) {
                 say({L"Nothing to read yet."}, true);
             } else {

@@ -611,10 +611,11 @@ bool Reader::readField(uintptr_t docview, Field& out) {
     }
 
     bool hidden = false;
+    std::vector<uintptr_t> hiddenBy;
     for (size_t i = 1; i < nodes.size(); ++i) {
         if (!(nodes[i].flags & kNodeVisible)) {
             hidden = true;
-            break;
+            hiddenBy.push_back(chain[i]);
         }
     }
     const bool rooted = (nodes.back().flags & kMovieRootFlags) == kMovieRootFlags;
@@ -625,6 +626,7 @@ bool Reader::readField(uintptr_t docview, Field& out) {
     out.y = world.ty / kTwipsPerPixel;
     std::memcpy(out.tint, tint, sizeof(tint));
     out.hidden = hidden;
+    out.hiddenBy = std::move(hiddenBy);
     out.rooted = rooted;
     out.docview = docview;
     out.chain = std::move(chain);
