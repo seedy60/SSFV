@@ -63,6 +63,8 @@ Clock::time_point g_stageSelectSeen = Clock::time_point::min();
 bool g_stageMoved = false;
 float g_lastControllerX = -1.0f;
 float g_lastControllerY = -1.0f;
+float g_lastPauseX = -1.0f;
+float g_lastPauseY = -1.0f;
 bool g_storyGrid = false;
 Clock::time_point g_storyGridAt = Clock::time_point::min();
 std::wstring g_storyCardName;
@@ -691,7 +693,7 @@ bool commandPanelLines(const std::vector<Field>& shown, bool commandScreen, Comm
             name = &field;
             continue;
         }
-        if (field.x >= 430.0f && field.x < 1000.0f && field.y >= 260.0f &&
+        if (field.x >= 430.0f && field.x < 520.0f && field.y >= 260.0f &&
             field.y < 740.0f && worthAnnouncing(field.text)) {
             body.push_back(&field);
         }
@@ -918,6 +920,42 @@ bool worthAnnouncing(const std::wstring& text) {
     // A long score is still worth saying. A clock such as 9:99:99.99 or a
     // symbol such as the infinity marker is not.
     return allDigits && text.size() > 6;
+}
+
+// A confirmation's buttons are plain white, while the menu behind them can
+// stay gold. Recognise the Yes/No pair before markChoices has settled so a
+// repaint gap cannot expose the menu row and its footer as the selection.
+bool confirmationPrompt(const std::vector<Field>& shown) {
+    bool yes = false;
+    bool no = false;
+    bool yesGold = false;
+    bool noGold = false;
+    for (const auto& field : shown) {
+        if (field.tint[3] <= 0.01f) continue;
+        const std::wstring text = trim(field.text);
+        if (text == L"Yes") {
+            yes = true;
+            yesGold = field.gold();
+        } else if (text == L"No") {
+            no = true;
+            noGold = field.gold();
+        }
+    }
+    return yes && no && !yesGold && !noGold;
+}
+
+// The prompt's question is longer-lived than its Yes/No labels, which can be
+// missing for a poll while the game rebuilds the focused button. A question
+// mark also distinguishes the prompt from the pause menu's descriptive footer.
+bool confirmationQuestion(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (field.tint[3] <= 0.01f || field.gold()) continue;
+        if (field.text.size() < 24) continue;
+        if (field.text.find(L'?') == std::wstring::npos) continue;
+        if (!worthAnnouncing(field.text)) continue;
+        return true;
+    }
+    return false;
 }
 
 // Arcade path select keeps the selected path's lore in one wide field on the
@@ -1385,12 +1423,16 @@ void updateFight(const std::vector<Field>& shown) {
             : fighting;
     g_fightClock = roundLive ? 1 : timer;
     radar::update(roundLive);
-    const std::wstring radarCharacter = radar::playerCharacter();
-    if (!radarCharacter.empty()) {
-        g_playerName = radarCharacter;
-    } else if (g_playerName.empty()) {
-        const std::wstring recordCharacter = g_fight->playerCharacter();
-        if (!recordCharacter.empty()) g_playerName = recordCharacter;
+    // The HUD can show only one fighter name in training, and the radar name
+    // can lag a character switch. The fight record knows which record belongs
+    // to the player, so use it first; otherwise the macro keeps the previous
+    // fighter's section and runs the wrong sequence.
+    const std::wstring recordCharacter = g_fight->playerCharacter();
+    if (!recordCharacter.empty()) {
+        g_playerName = recordCharacter;
+    } else {
+        const std::wstring radarCharacter = radar::playerCharacter();
+        if (!radarCharacter.empty()) g_playerName = radarCharacter;
     }
 
     // The game's own announcer calls the round and the knockout, and the
@@ -1505,6 +1547,18 @@ void poll(std::vector<Field> shown) {
         }
     }
     const bool anyChosen = chosenGroup != 0;
+    const bool pauseMenu = isPauseMenu(shown);
+    if (!anyChosen && pauseMenu &&
+        (confirmationPrompt(shown) || confirmationQuestion(shown))) {
+        // The prompt is between repaints, or its replacement button has not
+        // been marked yet. Hold instead of reading the gold menu row that is
+        // still visible behind it. Once the structural choice returns, the
+        // normal prompt path reads the question and the Yes/No button. The
+        // question is the fallback marker because one Yes/No label can vanish
+        // while the other is being redrawn.
+        g_pendingTexts.clear();
+        return;
+    }
     if (anyChosen) {
         g_lastChosenAt = Clock::now();
     } else if (!g_lastQuestion.empty() &&
@@ -1520,6 +1574,7 @@ void poll(std::vector<Field> shown) {
     // disabled row carries the highlight, so identify the overlay first and
     // look for the highlight even when that gold row is present.
     const bool controllerSetting = isControllerSetting(shown);
+    const bool commandPanelVisible = isCommandScreen(shown);
     if (!anyChosen) {
         bool anyGold = false;
         for (const auto& field : shown) {
@@ -1528,7 +1583,28 @@ void poll(std::vector<Field> shown) {
                 break;
             }
         }
-        if (!anyGold || controllerSetting) g_reader.markListFocus(shown);
+        // A pause menu keeps its last selectable row gold while the cursor is
+        // on a disabled row, so the absence of gold is not enough to find the
+        // full-row highlight those rows use.
+        if (!anyGold || controllerSetting || (pauseMenu && !commandPanelVisible)) {
+            g_reader.markListFocus(shown);
+        }
+        // The pause menu's right-hand value column can expose a visible part
+        // that looks like a row highlight even while a normal left row is
+        // gold. Only a grey row is a valid pause-menu cursor target, so drop
+        // any other shape match before it can become a second announcement.
+        if (pauseMenu && !commandPanelVisible) {
+            bool greyFocus = false;
+            for (const auto& field : shown) {
+                if (field.listSelected && isUnavailableRow(field)) {
+                    greyFocus = true;
+                    break;
+                }
+            }
+            if (!greyFocus) {
+                for (auto& field : shown) field.listSelected = false;
+            }
+        }
     }
 
     // The pause menu item that opened Controller Setting stays gold behind the
@@ -1542,7 +1618,7 @@ void poll(std::vector<Field> shown) {
     std::set<std::wstring> selectedTexts;
     const Field* selectedField = nullptr;
     bool unavailableFocus = false;
-    if (controllerSetting) {
+    if (controllerSetting || (pauseMenu && !commandPanelVisible)) {
         for (const auto& field : shown) {
             if (field.listSelected && isUnavailableRow(field)) {
                 unavailableFocus = true;
@@ -1562,7 +1638,7 @@ void poll(std::vector<Field> shown) {
         if (versusMode && trim(field.text) == L"Controller Settings") continue;
         const bool lit =
             anyChosen ? field.chosen
-                      : (controllerSetting && unavailableFocus
+                      : ((controllerSetting || pauseMenu) && unavailableFocus
                              ? field.listSelected
                              : (field.gold() || field.listSelected));
         // "BEST SCORE ---" is a label with no score behind it. The path name
@@ -1589,7 +1665,9 @@ void poll(std::vector<Field> shown) {
             if (controllerSetting) {
                 const std::wstring binding = g_keyConfig ? g_keyConfig->binding(text) : L"";
                 if (!binding.empty()) text += L", " + binding;
-                if (isUnavailableRow(field)) text += L", unavailable";
+            }
+            if ((controllerSetting || pauseMenu) && isUnavailableRow(field)) {
+                text += L", unavailable";
             }
             if (selectedTexts.insert(text).second) selected.push_back(text);
         }
@@ -1617,15 +1695,33 @@ void poll(std::vector<Field> shown) {
     bool characterSelectRandomOnly = false;
     if (characterSelect) characterSelectRandomOnly = characterSelectLabels(selected);
     std::vector<std::wstring> unavailable;
+    const bool listMenu = controllerSetting || pauseMenu;
+    const float lastListX = controllerSetting ? g_lastControllerX : g_lastPauseX;
+    const float lastListY = controllerSetting ? g_lastControllerY : g_lastPauseY;
     if (!controllerSetting) {
         g_lastControllerX = -1.0f;
         g_lastControllerY = -1.0f;
-    } else if (selectedField && g_lastControllerX >= 0.0f &&
-               g_lastControllerY >= 0.0f &&
-               std::fabs(selectedField->x - g_lastControllerX) < 60.0f &&
-               std::fabs(selectedField->y - g_lastControllerY) > 1.0f) {
-        const float low = std::min(selectedField->y, g_lastControllerY);
-        const float high = std::max(selectedField->y, g_lastControllerY);
+    }
+    if (!pauseMenu || controllerSetting) {
+        g_lastPauseX = -1.0f;
+        g_lastPauseY = -1.0f;
+    }
+    // Moving past the top or bottom wraps to the other end. The rows between
+    // the old and new y positions were not crossed, so do not announce them as
+    // skipped when the cursor wraps.
+    const bool pauseWrapped = pauseMenu && selectedField && lastListY >= 0.0f &&
+                              std::fabs(selectedField->y - lastListY) > 400.0f;
+    // Pause-menu grey rows can receive focus and are read then. Adding them as
+    // skipped notes when the cursor jumps over one is noise there, for example
+    // "Network Match Fight Request Settings, unavailable" between two ordinary
+    // rows. The Controller Settings overlay still needs the notes because its
+    // disabled actions can otherwise vanish silently.
+    const bool skippedNotes = !pauseMenu || controllerSetting;
+    if (skippedNotes && listMenu && selectedField && lastListX >= 0.0f && lastListY >= 0.0f &&
+        !pauseWrapped && std::fabs(selectedField->x - lastListX) < 60.0f &&
+        std::fabs(selectedField->y - lastListY) > 1.0f) {
+        const float low = std::min(selectedField->y, lastListY);
+        const float high = std::max(selectedField->y, lastListY);
         for (const auto& field : shown) {
             if (&field == selectedField || !isUnavailableRow(field)) continue;
             if (std::fabs(field.x - selectedField->x) >= 60.0f) continue;
@@ -1903,6 +1999,10 @@ void poll(std::vector<Field> shown) {
         if (controllerSetting && selectedField) {
             g_lastControllerX = selectedField->x;
             g_lastControllerY = selectedField->y;
+        }
+        if (pauseMenu && !controllerSetting && selectedField) {
+            g_lastPauseX = selectedField->x;
+            g_lastPauseY = selectedField->y;
         }
         if (repeated) return;
         g_pendingTexts.clear();

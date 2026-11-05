@@ -224,7 +224,10 @@ bool parseSequence(const std::wstring& text, int stepMs, int holdMs, std::vector
         std::wstring word = token;
         token.clear();
         if (word.rfind(L"720", 0) == 0) {
-            word = L"6321478963214789" + word.substr(3);
+            // A full rotation starts and ends on 6. The final 6 is needed to
+            // complete the second rotation; without it the motion ends on 9
+            // and is 45 degrees short, which is enough for SFV to reject it.
+            word = L"63214789632147896" + word.substr(3);
         }
 
         size_t pos = 0;

@@ -853,56 +853,49 @@ void Reader::markListFocus(std::vector<Field>& shown) {
         const auto& items = group.second.fields;
         if (items.size() < 2) continue;
 
-        std::vector<uintptr_t> containers;
-        std::vector<std::vector<size_t>> fieldIndices;
+        // The pause menu mixes simple left rows with wider right-hand value
+        // containers. Their child counts differ, so comparing every container
+        // together rejects the whole group. Compare same-shape containers in
+        // their own subgroup instead.
+        struct PartSet {
+            std::vector<size_t> indices;
+            std::vector<uintptr_t> parts;
+        };
+        std::map<size_t, std::vector<PartSet>> byWidth;
         for (const auto& [container, indices] : items) {
-            containers.push_back(container);
-            fieldIndices.push_back(indices);
+            std::vector<uintptr_t> parts = childrenOf(container);
+            if (parts.size() < 2) continue;
+            byWidth[parts.size()].push_back({indices, std::move(parts)});
         }
 
-        std::vector<std::vector<uintptr_t>> parts;
-        size_t width = 0;
-        bool alike = true;
-        for (uintptr_t container : containers) {
-            parts.push_back(childrenOf(container));
-            if (parts.back().size() < 2) {
-                alike = false;
-                break;
-            }
-            if (!width) {
-                width = parts.back().size();
-            } else if (parts.back().size() != width) {
-                alike = false;
-                break;
-            }
-        }
-        if (!alike || width < 2) continue;
-
-        for (size_t child = 0; child < width; ++child) {
-            int visible = 0;
-            size_t visibleIndex = 0;
-            bool readable = true;
-            for (size_t item = 0; item < parts.size(); ++item) {
-                float colour[4]{};
-                uint16_t flags = 0;
-                if (!appearance(parts[item][child], colour, flags)) {
-                    readable = false;
-                    break;
+        for (const auto& [width, partSets] : byWidth) {
+            if (partSets.size() < 2) continue;
+            for (size_t child = 0; child < width; ++child) {
+                int visible = 0;
+                size_t visibleIndex = 0;
+                bool readable = true;
+                for (size_t item = 0; item < partSets.size(); ++item) {
+                    float colour[4]{};
+                    uint16_t flags = 0;
+                    if (!appearance(partSets[item].parts[child], colour, flags)) {
+                        readable = false;
+                        break;
+                    }
+                    if ((flags & kNodeVisible) && colour[3] > 0.01f) {
+                        ++visible;
+                        visibleIndex = item;
+                    }
                 }
-                if ((flags & kNodeVisible) && colour[3] > 0.01f) {
-                    ++visible;
-                    visibleIndex = item;
-                }
-            }
-            if (!readable || visible != 1) continue;
+                if (!readable || visible != 1) continue;
 
-            float w = 0.0f, h = 0.0f;
-            if (!highlightBounds(parts[visibleIndex][child], w, h)) continue;
-            if (w < 100.0f || h < 10.0f) continue;
-            const size_t score = static_cast<size_t>(w * h);
-            if (score > bestScore) {
-                bestScore = score;
-                bestFields = fieldIndices[visibleIndex];
+                float w = 0.0f, h = 0.0f;
+                if (!highlightBounds(partSets[visibleIndex].parts[child], w, h)) continue;
+                if (w < 100.0f || h < 10.0f) continue;
+                const size_t score = static_cast<size_t>(w * h);
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestFields = partSets[visibleIndex].indices;
+                }
             }
         }
     }
@@ -920,7 +913,20 @@ void Reader::markCommandRow(std::vector<Field>& shown) {
         }
     }
     if (!footer || footer->chain.empty()) return;
-    const uintptr_t movie = footer->chain.back();
+
+    // The pause menu stays on screen behind the command overlay and shares the
+    // movie root, so the root alone does not say which rows belong to the
+    // list. A command row shares a closer, non-root ancestor with the footer.
+    // Requiring that ancestor keeps the menu's own rows (and their values) out
+    // of the command-row search.
+    auto inCommandPanel = [&](const Field& field) {
+        for (size_t i = 1; i + 1 < field.chain.size(); ++i) {
+            for (size_t j = 1; j + 1 < footer->chain.size(); ++j) {
+                if (field.chain[i] == footer->chain[j]) return true;
+            }
+        }
+        return false;
+    };
 
     std::map<uintptr_t, std::vector<uintptr_t>> cache;
     auto kids = [&](uintptr_t object) -> const std::vector<uintptr_t>& {
@@ -934,9 +940,10 @@ void Reader::markCommandRow(std::vector<Field>& shown) {
     std::map<uintptr_t, std::vector<uintptr_t>> groups;
     for (const auto& field : shown) {
         if (&field == footer) continue;
-        if (field.x < 430.0f || field.x >= 1000.0f || field.y < 260.0f || field.y >= 740.0f) {
+        if (field.x < 430.0f || field.x >= 520.0f || field.y < 260.0f || field.y >= 740.0f) {
             continue;
         }
+        if (!inCommandPanel(field)) continue;
         for (size_t level = 1; level < field.chain.size(); ++level) {
             const uintptr_t object = field.chain[level];
             const auto& parts = kids(object);
