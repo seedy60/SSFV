@@ -3,13 +3,33 @@ param(
     [string]$GamePath = "C:\Program Files (x86)\Steam\steamapps\common\StreetFighterV"
 )
 $ErrorActionPreference = "Stop"
-Set-Location $PSScriptRoot
 
+# $PSScriptRoot is empty when a selection is run in PowerShell ISE or the
+# script is pasted into a console. Fall back to the script's own path, then
+# to the current directory, instead of passing an empty Path to Set-Location.
+$root = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($root)) {
+    $scriptPath = $MyInvocation.MyCommand.Path
+    if (-not [string]::IsNullOrWhiteSpace($scriptPath)) {
+        $root = Split-Path -Parent $scriptPath
+    }
+}
+if ([string]::IsNullOrWhiteSpace($root)) {
+    $root = (Get-Location).Path
+}
+if ([string]::IsNullOrWhiteSpace($root)) {
+    throw "Cannot determine the project folder. Run install.ps1 from the folder that contains it."
+}
+Set-Location -LiteralPath $root
+
+if ([string]::IsNullOrWhiteSpace($GamePath)) {
+    $GamePath = "C:\Program Files (x86)\Steam\steamapps\common\StreetFighterV"
+}
 $target = Join-Path $GamePath "StreetFighterV\Binaries\Win64"
 if (-not (Test-Path (Join-Path $target "StreetFighterV.exe"))) {
     throw "StreetFighterV.exe was not found in $target. Pass -GamePath with the game folder."
 }
-$source = if (Test-Path "build\xinput1_3.dll") { Join-Path $PSScriptRoot "build" } else { $PSScriptRoot }
+$source = if (Test-Path "build\xinput1_3.dll") { Join-Path $root "build" } else { $root }
 if (-not (Test-Path (Join-Path $source "xinput1_3.dll"))) {
     throw "xinput1_3.dll is missing. Run .\build.ps1 first."
 }
