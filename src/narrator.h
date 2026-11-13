@@ -1,6 +1,6 @@
 #pragma once
 
-namespace sfva {
+namespace ssfv {
 namespace narrator {
 
 enum class Action {
@@ -12,7 +12,9 @@ enum class Action {
     Status,
     Snapshot,
     Silence,
-    ReadFight,
+    YourStats,
+    OpponentStats,
+    FightClock,
     ToggleRadar,
     DescribeRadar,
     MacroCritical,
@@ -28,4 +30,4 @@ void requestStop();
 void shutdown();
 
 }  // namespace narrator
-}  // namespace sfva
+}  // namespace ssfv

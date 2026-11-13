@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace sfva {
+namespace ssfv {
 
 // One Scaleform text field as the game is drawing it.
 struct Field {
@@ -62,6 +62,10 @@ public:
     // The V-Skill, V-Trigger and EX badges on the selected move row, as words.
     std::vector<std::wstring> commandBadges();
 
+    // The live round clock in whole seconds from the HUD's "timer_count"
+    // display object, or -1. The timer is two digit clips, not text.
+    int clockSeconds(const std::vector<Field>& fields);
+
     // True when this grid label's cell carries the visible checkmark that
     // marks the cursor on grids whose labels are all left bright (Battle BGM).
     bool gridChosen(const Field& field);
@@ -94,4 +98,4 @@ private:
     uintptr_t commandRow_ = 0;  // the row markCommandRow found the cursor on
 };
 
-}  // namespace sfva
+}  // namespace ssfv

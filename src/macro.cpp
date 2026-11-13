@@ -10,7 +10,7 @@
 
 #include "common.h"
 
-namespace sfva {
+namespace ssfv {
 namespace macro {
 namespace {
 
@@ -323,7 +323,7 @@ std::wstring labelFor(Kind kind) {
 std::wstring readMacro(const std::wstring& section, const std::wstring& key,
                        const std::wstring& fallback) {
     wchar_t buffer[256]{};
-    const std::wstring path = moduleDir() + L"\\sfvaccess.ini";
+    const std::wstring path = moduleDir() + L"\\ssfv.ini";
     GetPrivateProfileStringW(section.c_str(), key.c_str(), fallback.c_str(), buffer,
                              static_cast<DWORD>(std::size(buffer)), path.c_str());
     return buffer;
@@ -387,4 +387,4 @@ void requestStop() {
 }
 
 }  // namespace macro
-}  // namespace sfva
+}  // namespace ssfv

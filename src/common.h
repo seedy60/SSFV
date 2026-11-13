@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <string>
 
-namespace sfva {
+namespace ssfv {
 
 extern HMODULE g_self;
 extern std::wstring g_dir;
@@ -45,4 +45,4 @@ inline bool plausiblePointer(uintptr_t value) {
 // stealing Ctrl+Shift combinations from other programs.
 bool gameHasFocus();
 
-}  // namespace sfva
+}  // namespace ssfv

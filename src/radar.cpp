@@ -22,7 +22,7 @@
 #include "fight.h"
 #include "object_index.h"
 
-namespace sfva {
+namespace ssfv {
 namespace radar {
 namespace {
 
@@ -426,4 +426,4 @@ void requestStop() {
 }
 
 }  // namespace radar
-}  // namespace sfva
+}  // namespace ssfv

@@ -15,7 +15,7 @@
 
 #include "common.h"
 
-namespace sfva {
+namespace ssfv {
 namespace {
 
 // Function tables and field offsets, as module offsets, confirmed against the
@@ -45,6 +45,9 @@ constexpr uint64_t kMaxPictureUrl = 512;
 
 constexpr uintptr_t kDisplayParent = 0x38;
 constexpr uintptr_t kDisplayRenderNode = 0x48;
+constexpr uintptr_t kDisplayName = 0x70;   // handle to the interface instance name
+constexpr uintptr_t kNameHandleName = 0x10;
+constexpr uintptr_t kTimerSeconds = 0x11C;  // timer_count's whole-second countdown
 constexpr uintptr_t kDisplayChildren = 0xD8;  // array of display object pointers
 constexpr uintptr_t kDisplayChildCount = 0xE0;
 constexpr uintptr_t kDisplayChildStride = 0x10;
@@ -1070,6 +1073,78 @@ void Reader::markCommandRow(std::vector<Field>& shown) {
     }
 }
 
+int Reader::clockSeconds(const std::vector<Field>& fields) {
+    // The HUD's timer is the display object named "timer_count". Its
+    // +0x11C field is the countdown in whole seconds. It is a movie clip of
+    // two digit clips, not a text field, so the name is the reliable handle.
+    uintptr_t root = 0;
+    for (const Field& field : fields) {
+        if (field.chain.empty()) continue;
+        if (field.text == L"PLAYER 1" || field.text == L"PLAYER 2" || field.text == L"CPU") {
+            root = field.chain.back();
+            break;
+        }
+    }
+    if (!root) {
+        for (const Field& field : fields) {
+            if (!field.chain.empty() && field.x >= 850.0f && field.x <= 950.0f &&
+                field.y >= 50.0f && field.y <= 120.0f) {
+                root = field.chain.back();
+                break;
+            }
+        }
+    }
+    if (!root) return -1;
+
+    struct Node {
+        uintptr_t object;
+        Affine world;
+    };
+    std::vector<Node> stack{{root, {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f}}};
+    std::unordered_set<uintptr_t> seen;
+    while (!stack.empty() && seen.size() < 8192) {
+        const Node node = stack.back();
+        stack.pop_back();
+        if (!node.object || seen.count(node.object)) continue;
+        seen.insert(node.object);
+
+        float matrix[6]{};
+        float colour[4]{};
+        uint16_t flags = 0;
+        uintptr_t parent = 0;
+        if (readNode(node.object, matrix, colour, flags, parent)) {
+            const Affine local{matrix[0], matrix[1], matrix[2], matrix[3], matrix[4], matrix[5]};
+            const Affine world = compose(node.world, local);
+            const float x = world.tx / kTwipsPerPixel;
+            const float y = world.ty / kTwipsPerPixel;
+            bool timer = false;
+            uintptr_t nameHandle = 0;
+            if (readValue(node.object + kDisplayName, nameHandle) && plausiblePointer(nameHandle)) {
+                uintptr_t nameNode = 0;
+                if (readValue(nameHandle + kNameHandleName, nameNode) && plausiblePointer(nameNode)) {
+                    uintptr_t nameData = 0;
+                    if (readValue(nameNode, nameData) && plausiblePointer(nameData)) {
+                        char raw[64]{};
+                        if (readRaw(nameData, raw, sizeof(raw) - 1)) {
+                            timer = std::strcmp(raw, "timer_count") == 0;
+                        }
+                    }
+                }
+            }
+            if (timer) {
+                int32_t seconds = -1;
+                if (readValue(node.object + kTimerSeconds, seconds) && seconds >= 0 && seconds <= 99) {
+                    return seconds;
+                }
+            }
+            for (const uintptr_t child : childrenOf(node.object)) {
+                stack.push_back({child, world});
+            }
+        }
+    }
+    return -1;
+}
+
 std::vector<std::wstring> Reader::commandBadges() {
     std::vector<std::wstring> words;
     if (!commandRow_) return words;
@@ -1306,4 +1381,4 @@ std::vector<Field> Reader::read() {
     return fields;
 }
 
-}  // namespace sfva
+}  // namespace ssfv

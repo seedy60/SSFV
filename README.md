@@ -40,7 +40,7 @@ the license beside it. Its DLL is copied into the game folder with the mod.
 2. Extract the zip file to a location of your choosing.
 3. Run install.exe.
 
-The installer copies `xinput1_3.dll`, `nvdaControllerClient64.dll`, `sfvaccess.ini` and a small marker file into `StreetFighterV\Binaries\Win64`. Pass `-GamePath` if the game is somewhere else. Start the game normally through Steam.
+The installer copies `xinput1_3.dll`, `nvdaControllerClient64.dll`, `ssfv.ini` and a small marker file into `StreetFighterV\Binaries\Win64`. Pass `-GamePath` if the game is somewhere else. Start the game normally through Steam.
 
 ### Compiling
 
@@ -53,13 +53,14 @@ The installer copies `xinput1_3.dll`, `nvdaControllerClient64.dll`, `sfvaccess.i
 ```
 
 If `xinput1_3.dll` already exists, for example from SF5DInput, the
-installer keeps it as `xinput1_3.dll.before-sfvaccess`. Two proxies cannot
+installer keeps it as `xinput1_3.dll.before-ssfv`. Two proxies cannot
 share the name, so remove SF5DInput before using this mod.
 
 ## Keys
 
 The keys work while the game has focus. They are released when you switch to
 another program, so Ctrl+Shift+A and friends stay available everywhere else.
+The three fight readout keys are configurable; the table shows their defaults.
 
 | Key | Action |
 | --- | --- |
@@ -71,7 +72,9 @@ another program, so Ctrl+Shift+A and friends stay available everywhere else.
 | Ctrl+Shift+I | Status: fields read, sweep time, speech backend (for testing) |
 | Ctrl+Shift+S | Save a snapshot of every field to a file |
 | Ctrl+Shift+X | Stop speaking |
-| Ctrl+Shift+H | Read both fighters' health, V-Gauge and Critical level |
+| Ctrl+Shift+H | Read your health, V-Gauge and Critical level |
+| Ctrl+Shift+O | Read the opponent's health, V-Gauge and Critical level |
+| Ctrl+Shift+C | Read the fight clock |
 | Ctrl+Shift+P | Turn the character radar on or off |
 | Ctrl+Shift+D | Read the opponent's direction and distance |
 | Ctrl+Shift+F1 | Play the current character's Critical Art macro |
@@ -86,7 +89,7 @@ SSFV features a character radar that allows you to easily gage where your oppone
 
 ## Settings
 
-`sfvaccess.ini` sits beside the DLL.
+`ssfv.ini` sits beside the DLL.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
@@ -104,6 +107,19 @@ Radar settings live under `[radar]`: `enabled`, `volume`, `range`, `height`,
 and 520. `range` and `height` are world units; `near_ms` and `far_ms` are the
 pulse interval at point-blank and full range.
 
+Fight readout keys live under `[hotkeys]`: `your_stats`, `opponent_stats` and
+`fight_clock`. They accept a letter, a digit, `F1` through `F24`, or a named
+key such as `UP`, `DOWN`, `SPACE`, `TAB`, `ENTER`, `INSERT`, `DELETE`, `HOME`,
+`END`, `PAGEUP` or `PAGEDOWN`. The defaults are `H`, `O` and `C`. A key must
+not duplicate another Ctrl+Shift binding.
+
+```ini
+[hotkeys]
+your_stats=H
+opponent_stats=O
+fight_clock=C
+```
+
 Macro settings live under `[macros]`: `enabled`, `critical_key`, `vskill_key`,
 `vtrigger_key`, `step_ms`, `hold_ms`, `critical`, `vskill` and `vtrigger`.
 The first three keys are registered with Ctrl+Shift. The last three are the
@@ -114,7 +130,7 @@ fallback sequences for characters without their own section.
 critical=236236P
 
 [macros.GUILE]
-critical=[4]6[4]6P
+critical=[4]646P
 ```
 
 A section is `[macros.<name>]`, using the name on the health bar. Directions
@@ -126,9 +142,9 @@ rotations. `P` means heavy punch, `K` heavy kick; `LP`, `MP`,
 
 The INI ships a Critical Art preset for every character with a fixed input.
 V-Skill and V-Trigger still come from the defaults for everyone. Eleven copies
-its opponent, so it has no Critical Art section; Guile's preset holds back
-twice for his charge motion, and Zangief's `720P` expands to two full
+its opponent, so it has no Critical Art section; Guile's preset charges
+back once for his `4646P` motion, and Zangief's `720P` expands to two full
 rotations.
 
-Log: `sfvaccess-native.log`, beside the DLL. It records the speech backend,
+Log: `ssfv-native.log`, beside the DLL. It records the speech backend,
 each sweep, the build check and every announcement.

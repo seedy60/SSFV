@@ -4,7 +4,7 @@
 #include <iterator>
 #include <mutex>
 
-namespace sfva {
+namespace ssfv {
 
 HMODULE g_self = nullptr;
 std::wstring g_dir;
@@ -57,7 +57,7 @@ void logInit(const std::wstring& path) {
     if (g_log) {
         SYSTEMTIME now{};
         GetLocalTime(&now);
-        fwprintf(g_log, L"\n=== SFAccess Native %04d-%02d-%02d %02d:%02d:%02d ===\n",
+        fwprintf(g_log, L"\n=== SSFV Native %04d-%02d-%02d %02d:%02d:%02d ===\n",
                  now.wYear, now.wMonth, now.wDay, now.wHour, now.wMinute, now.wSecond);
         fflush(g_log);
     }
@@ -85,7 +85,7 @@ void logLine(const std::wstring& text) {
             }
         }
     }
-    OutputDebugStringW((L"SFAccess: " + text + L"\n").c_str());
+    OutputDebugStringW((L"SSFV: " + text + L"\n").c_str());
 }
 
 bool readRaw(uintptr_t address, void* out, size_t size) {
@@ -106,4 +106,4 @@ bool gameHasFocus() {
     return pid == GetCurrentProcessId();
 }
 
-}  // namespace sfva
+}  // namespace ssfv

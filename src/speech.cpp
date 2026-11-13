@@ -11,7 +11,7 @@
 
 #include "common.h"
 
-namespace sfva {
+namespace ssfv {
 namespace speech {
 namespace {
 
@@ -307,4 +307,4 @@ void shutdown() {
 }
 
 }  // namespace speech
-}  // namespace sfva
+}  // namespace ssfv

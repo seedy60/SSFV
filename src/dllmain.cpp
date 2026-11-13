@@ -1,4 +1,4 @@
-// SFAccess Native: an in-process menu narrator for Street Fighter V.
+// SSFV Native: an in-process menu narrator for Street Fighter V.
 //
 // The mod is an xinput1_3.dll proxy. The game imports xinput1_3.dll at startup,
 // so copying this DLL beside StreetFighterV.exe loads it before the game's own
@@ -22,15 +22,15 @@ unsigned WINAPI initThread(void*) {
     // instead of about an empty heap.
     Sleep(1500);
 
-    sfva::logInit(sfva::moduleDir() + L"\\sfvaccess-native.log");
-    sfva::logLine(L"SFAccess Native 0.1.0 starting");
+    ssfv::logInit(ssfv::moduleDir() + L"\\ssfv-native.log");
+    ssfv::logLine(L"SSFV Native 0.1.0 starting");
 
     wchar_t exePath[MAX_PATH * 2]{};
     GetModuleFileNameW(nullptr, exePath, static_cast<DWORD>(std::size(exePath)));
-    sfva::logLine(std::wstring(L"game: ") + exePath);
+    ssfv::logLine(std::wstring(L"game: ") + exePath);
 
-    sfva::narrator::start();
-    sfva::hotkeys::start();
+    ssfv::narrator::start();
+    ssfv::hotkeys::start();
     return 0;
 }
 
@@ -38,7 +38,7 @@ unsigned WINAPI initThread(void*) {
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) {
-        sfva::g_self = instance;
+        ssfv::g_self = instance;
         DisableThreadLibraryCalls(instance);
         HANDLE thread = reinterpret_cast<HANDLE>(_beginthreadex(nullptr, 0, initThread, nullptr, 0, nullptr));
         if (thread) CloseHandle(thread);
@@ -50,9 +50,9 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     // static destruction is the crash the game used to show on exit. The
     // threads are detached, so this only sets flags and waits briefly.
     if (reason == DLL_PROCESS_DETACH) {
-        sfva::narrator::requestStop();
-        sfva::hotkeys::requestStop();
-        sfva::speech::requestStop();
+        ssfv::narrator::requestStop();
+        ssfv::hotkeys::requestStop();
+        ssfv::speech::requestStop();
         Sleep(250);
     }
     return TRUE;

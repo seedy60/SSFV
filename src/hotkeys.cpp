@@ -12,7 +12,7 @@
 #include "macro.h"
 #include "narrator.h"
 
-namespace sfva {
+namespace ssfv {
 namespace hotkeys {
 namespace {
 
@@ -24,7 +24,9 @@ constexpr int kToggle = 0x5305;
 constexpr int kStatus = 0x5306;
 constexpr int kSnapshot = 0x5307;
 constexpr int kSilence = 0x5308;
-constexpr int kReadFight = 0x5309;
+constexpr int kYourStats = 0x5309;
+constexpr int kOpponentStats = 0x530F;
+constexpr int kFightClock = 0x5310;
 constexpr int kToggleRadar = 0x530A;
 constexpr int kDescribeRadar = 0x530E;
 constexpr int kMacroCritical = 0x530B;
@@ -115,10 +117,31 @@ void buildBindings() {
         {kStatus, 'I', narrator::Action::Status, L"Ctrl+Shift+I"},
         {kSnapshot, 'S', narrator::Action::Snapshot, L"Ctrl+Shift+S"},
         {kSilence, 'X', narrator::Action::Silence, L"Ctrl+Shift+X"},
-        {kReadFight, 'H', narrator::Action::ReadFight, L"Ctrl+Shift+H"},
         {kToggleRadar, 'P', narrator::Action::ToggleRadar, L"Ctrl+Shift+P"},
         {kDescribeRadar, 'D', narrator::Action::DescribeRadar, L"Ctrl+Shift+D"},
     };
+
+    const struct {
+        int id;
+        const std::wstring* text;
+        narrator::Action action;
+        const wchar_t* name;
+    } readouts[] = {
+        {kYourStats, &g_config.yourStatsKey, narrator::Action::YourStats, L"your_stats"},
+        {kOpponentStats, &g_config.opponentStatsKey, narrator::Action::OpponentStats,
+         L"opponent_stats"},
+        {kFightClock, &g_config.fightClockKey, narrator::Action::FightClock, L"fight_clock"},
+    };
+    for (const auto& readout : readouts) {
+        UINT key = 0;
+        if (!parseKey(*readout.text, key)) {
+            logLine(L"hotkey not understood: " + std::wstring(readout.name) + L"=" +
+                    *readout.text);
+            continue;
+        }
+        addBinding(g_bindings, readout.id, key, readout.action,
+                   L"Ctrl+Shift+" + *readout.text);
+    }
 
     if (!g_config.macros) return;
     const struct {
@@ -223,4 +246,4 @@ void shutdown() {
 }
 
 }  // namespace hotkeys
-}  // namespace sfva
+}  // namespace ssfv

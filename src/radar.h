@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-namespace sfva {
+namespace ssfv {
 
 struct Config;
 
@@ -27,4 +27,4 @@ std::wstring describe();
 void requestStop();
 
 }  // namespace radar
-}  // namespace sfva
+}  // namespace ssfv

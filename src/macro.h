@@ -4,7 +4,7 @@
 
 #include "config.h"
 
-namespace sfva {
+namespace ssfv {
 namespace macro {
 
 enum class Kind { Critical, VSkill, VTrigger };
@@ -22,4 +22,4 @@ bool active();
 void requestStop();
 
 }  // namespace macro
-}  // namespace sfva
+}  // namespace ssfv

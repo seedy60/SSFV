@@ -4,7 +4,7 @@
 #include <string>
 #include <vector>
 
-namespace sfva {
+namespace ssfv {
 
 // A small read-only view of the game's Unreal Engine object graph. The fight
 // reader works from allocation scanning; the radar needs class instances,
@@ -46,4 +46,4 @@ private:
     std::wstring classCacheName_;
 };
 
-}  // namespace sfva
+}  // namespace ssfv

@@ -4,10 +4,10 @@
 
 #include "common.h"
 
-namespace sfva {
+namespace ssfv {
 
 Config loadConfig() {
-    const std::wstring path = moduleDir() + L"\\sfvaccess.ini";
+    const std::wstring path = moduleDir() + L"\\ssfv.ini";
     Config cfg;
     auto getInt = [&](const wchar_t* section, const wchar_t* key, int fallback) {
         return static_cast<int>(GetPrivateProfileIntW(section, key, fallback, path.c_str()));
@@ -34,6 +34,10 @@ Config loadConfig() {
     cfg.radarNearMs = getInt(L"radar", L"near_ms", 120);
     cfg.radarFarMs = getInt(L"radar", L"far_ms", 650);
     cfg.radarBaseHz = getInt(L"radar", L"base_hz", 520);
+
+    cfg.yourStatsKey = getText(L"hotkeys", L"your_stats", L"H");
+    cfg.opponentStatsKey = getText(L"hotkeys", L"opponent_stats", L"O");
+    cfg.fightClockKey = getText(L"hotkeys", L"fight_clock", L"C");
 
     cfg.macros = getInt(L"macros", L"enabled", 1) != 0;
     cfg.macroCriticalKey = getText(L"macros", L"critical_key", L"F1");
@@ -71,4 +75,4 @@ Config loadConfig() {
     return cfg;
 }
 
-}  // namespace sfva
+}  // namespace ssfv

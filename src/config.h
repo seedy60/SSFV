@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace sfva {
+namespace ssfv {
 
 struct Config {
     bool enabled = true;
@@ -24,6 +24,11 @@ struct Config {
     int radarFarMs = 650;
     int radarBaseHz = 520;
 
+    // Fight readout keys. Like every hotkey, they are pressed with Ctrl+Shift.
+    std::wstring yourStatsKey = L"H";
+    std::wstring opponentStatsKey = L"O";
+    std::wstring fightClockKey = L"C";
+
     // Macros. The keys are pressed with Ctrl+Shift; the game receives the
     // sequence itself as ordinary keyboard input.
     bool macros = true;
@@ -36,4 +41,4 @@ struct Config {
 
 Config loadConfig();
 
-}  // namespace sfva
+}  // namespace ssfv

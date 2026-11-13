@@ -6,7 +6,7 @@
 
 #include "common.h"
 
-namespace sfva {
+namespace ssfv {
 namespace {
 
 // Facts about build v07.011, from the SFV Access project's engine work. The
@@ -124,4 +124,4 @@ std::wstring KeyConfigReader::binding(const std::wstring& action) {
     return buttonName(layout_[static_cast<size_t>(slot)]);
 }
 
-}  // namespace sfva
+}  // namespace ssfv

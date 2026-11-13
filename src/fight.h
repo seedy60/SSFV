@@ -6,7 +6,7 @@
 
 #include "object_index.h"
 
-namespace sfva {
+namespace ssfv {
 
 struct Gauges {
     int health = 0;
@@ -79,8 +79,9 @@ private:
     int64_t nextCpuTryMs_ = 0;
     uintptr_t setting_ = 0;  // the live KWBattleSetting, not its saved copy
     int64_t nextSettingTryMs_ = 0;
+
     uintptr_t playerRecord_ = 0;  // set once the player's side is known
     std::wstring playerCode_;     // the USER entry's character code, "Z31"
 };
 
-}  // namespace sfva
+}  // namespace ssfv

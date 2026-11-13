@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace sfva {
+namespace ssfv {
 namespace speech {
 
 // Picks the best available output: Prism (any supported screen reader),
@@ -16,4 +16,4 @@ void shutdown();
 std::wstring backendName();
 
 }  // namespace speech
-}  // namespace sfva
+}  // namespace ssfv

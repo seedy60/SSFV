@@ -6,7 +6,7 @@
 
 #include "common.h"
 
-namespace sfva {
+namespace ssfv {
 namespace {
 
 // Facts about build v07.011, from the SFV Access project's engine work.
@@ -198,4 +198,4 @@ bool ObjectIndex::instanceAlive(uintptr_t object, uintptr_t classAddress) const 
     return classAddress == 0 || cls == classAddress;
 }
 
-}  // namespace sfva
+}  // namespace ssfv

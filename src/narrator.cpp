@@ -24,7 +24,7 @@
 
 #include <memory>
 
-namespace sfva {
+namespace ssfv {
 namespace narrator {
 namespace {
 
@@ -114,12 +114,13 @@ std::wstring spoken(const std::wstring& text) {
 
 // Arcade result screens put the loading counter before the tip quote, either
 // as its own field or attached to it. Remove the counter prefix before speech
-// can join it to the quote; keep the quote that follows it.
+// can join it to the quote; keep the quote that follows it. A standalone
+// GAME OVER line has no content the screen reader needs.
 std::wstring stripStageOverlay(std::wstring text) {
     const std::wstring t = trim(text);
     if (t.rfind(L"GAME OVER", 0) != 0) return text;
     size_t i = t.find(L"TIP");
-    if (i == std::wstring::npos) return text;
+    if (i == std::wstring::npos) return {};
     i += 3;
     if (i < t.size() && t[i] == L'S') ++i;
     bool digits = false;
@@ -127,7 +128,7 @@ std::wstring stripStageOverlay(std::wstring text) {
         if (iswdigit(t[i])) digits = true;
         ++i;
     }
-    if (!digits) return text;
+    if (!digits) return {};
     while (i < t.size() && (t[i] == L'.' || t[i] == L' ')) ++i;
     return t.substr(i);
 }
@@ -317,7 +318,7 @@ void dropFaded(std::vector<Field>& shown) {
 void say(const std::vector<std::wstring>& lines, bool interrupt) {
     std::vector<std::wstring> cleaned;
     for (const auto& line : lines) {
-    std::wstring text = stripStageOverlay(spoken(line));
+        std::wstring text = stripStageOverlay(spoken(line));
         if (!text.empty()) cleaned.push_back(text);
     }
     if (cleaned.empty()) return;
@@ -765,10 +766,17 @@ std::pair<std::wstring, std::wstring> hudNames(const std::vector<Field>& shown) 
     return {found.front().second, found.back().second};
 }
 
-// The round clock is the only one or two digit text in the top middle.
+// The round clock is the one or two digit text in the clock's slot at the
+// top centre. The stage number sits just to its right, and on stage 10 it is
+// also a two digit number; taking the first number in the whole top middle
+// therefore reported the stage as the clock. The score sits to the left.
 int hudTimer(const std::vector<Field>& shown) {
+    int best = -1;
     for (const auto& field : shown) {
-        if (field.y > 170.0f || field.x < 700.0f || field.x > 1220.0f) continue;
+        if (field.y > 170.0f || field.x < 900.0f || field.x > 1220.0f) continue;
+        // The stage indicator is at x 1009, y 53. It is not a round clock,
+        // even when its number happens to be 10.
+        if (field.y < 100.0f && field.x > 1000.0f) continue;
         if (field.text.size() < 1 || field.text.size() > 2) continue;
         bool digits = true;
         for (wchar_t c : field.text) {
@@ -778,9 +786,14 @@ int hudTimer(const std::vector<Field>& shown) {
             }
         }
         if (!digits) continue;
-        return (field.text[0] - L'0') * 10 + (field.text.size() > 1 ? field.text[1] - L'0' : 0);
+        const int value =
+            (field.text[0] - L'0') * 10 + (field.text.size() > 1 ? field.text[1] - L'0' : 0);
+        // If a stage or an overlay leaves more than one number in the slot,
+        // the round clock is the larger one: a clock only counts down from
+        // its starting value, while the decorations around it are small.
+        if (value > best) best = value;
     }
-    return -1;
+    return best;
 }
 
 // The labels over the two health bars. They are present in the final stage's
@@ -887,14 +900,13 @@ bool handleTipsScreen(const std::vector<Field>& shown, Clock::time_point now) {
     return true;
 }
 
-// The final-stage loading overlay leaves a hidden progress label with the
-// game-over tips count in the field list. It is not screen content, but the
-// generic new-text path otherwise reads "GAME OVER. TIPS 1" during the boss
-// entrance. Keep a real standalone GAME OVER message read; only the combined
-// overlay is noise.
-bool hiddenStageOverlay(const std::wstring& text) {
+// GAME OVER is drawn both as a standalone field and as the final-stage
+// loading overlay's "GAME OVER. TIPS 1" label. The game's announcer already
+// says game over, so the reader should not repeat the heading. If the field
+// also carries a tip quote, stripStageOverlay leaves that quote for speech.
+bool gameOverOverlay(const std::wstring& text) {
     const std::wstring t = trim(text);
-    return t.rfind(L"GAME OVER", 0) == 0 && t.find(L"TIP") != std::wstring::npos;
+    return t.rfind(L"GAME OVER", 0) == 0 && stripStageOverlay(t).empty();
 }
 
 // The login and title screens draw a legal copyright line alongside the
@@ -911,7 +923,7 @@ bool copyrightNotice(const std::wstring& text) {
 // "70" over the action. A line with no letters and only a few characters is
 // an instrument, not an announcement.
 bool worthAnnouncing(const std::wstring& text) {
-    if (hiddenStageOverlay(text) || copyrightNotice(text) || tipCounter(text)) return false;
+    if (gameOverOverlay(text) || copyrightNotice(text) || tipCounter(text)) return false;
     bool allDigits = true;
     for (wchar_t c : text) {
         if (iswalpha(c)) return true;
@@ -1294,7 +1306,7 @@ bool isVersusModeScreen(const std::vector<Field>& shown) {
     return modeItem && !preMatch;
 }
 
-void announceFight() {
+bool readFightGauges(Gauges& left, Gauges& right, bool& matched) {
     const auto shown = onScreen(g_reader.read());
     const auto [leftName, rightName] = hudNames(shown);
     if (!leftName.empty()) {
@@ -1304,24 +1316,46 @@ void announceFight() {
     if (!g_fight->found() && !g_fight->scan()) {
         g_nextFightScan = Clock::now() + std::chrono::seconds(5);
         say({L"No fight to read."}, true);
-        return;
+        return false;
     }
-    Gauges left, right;
-    bool matched = false;
     if (!g_fight->read(leftName, rightName, left, right, matched)) {
         say({L"No fight to read."}, true);
-        return;
+        return false;
     }
     if (g_playerName.empty()) {
         const std::wstring recordCharacter = g_fight->playerCharacter();
         if (!recordCharacter.empty()) g_playerName = recordCharacter;
     }
-    // The round clock is drawn as art, not as a text field, so hudTimer picks
-    // up unrelated HUD text (a 00, a stage number, the 9:59:59.99 sample).
-    // Until a real clock source is found, read the two fighters only.
-    say({left.words(matched ? L"You" : L"Player 1"),
-         right.words(matched ? L"Opponent" : L"Player 2")},
-        true);
+    return true;
+}
+
+void announceStats(bool opponent) {
+    Gauges left, right;
+    bool matched = false;
+    if (!readFightGauges(left, right, matched)) return;
+    if (opponent) {
+        say({right.words(matched ? L"Opponent" : L"Player 2")}, true);
+    } else {
+        say({left.words(matched ? L"You" : L"Player 1")}, true);
+    }
+}
+
+void announceClock() {
+    const auto shown = onScreen(g_reader.read());
+    const bool display = fightLabels(shown);
+    int timer = g_reader.clockSeconds(shown);
+    if (timer < 0) timer = hudTimer(shown);
+    if (timer < 0 && !display) {
+        say({L"No fight to read."}, true);
+        return;
+    }
+    if (timer < 0) timer = g_lastTimer;
+    if (timer < 0) {
+        say({L"The fight clock is not on screen."}, true);
+        return;
+    }
+    const std::wstring unit = timer == 1 ? L" second." : L" seconds.";
+    say({L"Fight clock, " + std::to_wstring(timer) + unit}, true);
 }
 
 // The pause overlay leaves the fight HUD, including both health labels, on
@@ -1366,13 +1400,14 @@ void updateFight(const std::vector<Field>& shown) {
         radar::update(false);
         return;
     }
-    const int timer = hudTimer(shown);
+    const bool display = fightLabels(shown);
+    int timer = g_reader.clockSeconds(shown);
+    if (timer < 0) timer = hudTimer(shown);
     g_fightClock = timer;
     // The final stage draws its clock as art, so hudTimer finds no field
     // there. Its health-bar labels do show, and they are enough to tell that
     // a fight is on screen; don't switch the radar off just for a missing
     // clock.
-    const bool display = fightLabels(shown);
     if (timer < 0 && !display) {
         g_lastTimer = -1;
         g_playerName.clear();
@@ -1445,7 +1480,7 @@ void updateFight(const std::vector<Field>& shown) {
 }
 
 void status() {
-    std::wstring text = L"SFAccess. " + std::to_wstring(g_shownCount) + L" text fields on screen, " +
+    std::wstring text = L"SSFV. " + std::to_wstring(g_shownCount) + L" text fields on screen, " +
                         std::to_wstring(g_reader.fieldCount()) + L" known";
     if (g_reader.scanMillis() > 0) {
         text += L". Sweep " + std::to_wstring(g_reader.scanMillis()) + L" milliseconds";
@@ -1469,7 +1504,7 @@ void snapshot() {
     }
     const auto fields = g_reader.read();
     const auto shown = onScreen(fields);
-    fwprintf(file, L"SFAccess snapshot, %04d-%02d-%02d %02d:%02d:%02d\n", now.wYear, now.wMonth,
+    fwprintf(file, L"SSFV snapshot, %04d-%02d-%02d %02d:%02d:%02d\n", now.wYear, now.wMonth,
              now.wDay, now.wHour, now.wMinute, now.wSecond);
     fwprintf(file, L"%zu fields read, %zu on screen\n", fields.size(), shown.size());
     for (const auto& field : fields) {
@@ -1628,7 +1663,7 @@ void poll(std::vector<Field> shown) {
     }
     const Field* footer = nullptr;
     for (const auto& field : shown) {
-        if (hiddenStageOverlay(field.text) || copyrightNotice(field.text) ||
+        if (gameOverOverlay(field.text) || copyrightNotice(field.text) ||
             tipCounter(field.text)) continue;
         if (controllerSetting && field.x < 700.0f &&
             (trim(field.text) == L"Controller Setting" ||
@@ -1672,7 +1707,7 @@ void poll(std::vector<Field> shown) {
             if (selectedTexts.insert(text).second) selected.push_back(text);
         }
         if (!anyChosen && !footer && field.y >= 960.0f && field.x < 400.0f &&
-            !copyrightNotice(field.text) && !hiddenStageOverlay(field.text) &&
+            !copyrightNotice(field.text) && !gameOverOverlay(field.text) &&
             !tipCounter(field.text)) {
             footer = &field;
         }
@@ -1910,8 +1945,10 @@ void poll(std::vector<Field> shown) {
         std::vector<std::wstring> question;
         if (anyChosen) {
             for (const auto& field : shown) {
-                if (hiddenStageOverlay(field.text) || copyrightNotice(field.text) ||
-            tipCounter(field.text)) continue;
+                if (gameOverOverlay(field.text) || copyrightNotice(field.text) ||
+                    tipCounter(field.text)) {
+                    continue;
+                }
                 if (field.chosen || field.button) continue;
                 if (field.text.size() <= 24) continue;
                 if (std::find(field.chain.begin(), field.chain.end(), chosenPanel) ==
@@ -2134,8 +2171,10 @@ void handle(Action action) {
             std::vector<std::wstring> lines;
             std::set<std::wstring> seen;
             for (const auto& field : shown) {
-                if (hiddenStageOverlay(field.text) || copyrightNotice(field.text) ||
-            tipCounter(field.text)) continue;
+                if (gameOverOverlay(field.text) || copyrightNotice(field.text) ||
+                    tipCounter(field.text)) {
+                    continue;
+                }
                 std::wstring text = field.text;
                 if (stageSelect && randomStageName(field)) text = L"Random stage";
                 if (!seen.insert(text).second) continue;
@@ -2165,8 +2204,14 @@ void handle(Action action) {
         case Action::Silence:
             speech::stop();
             break;
-        case Action::ReadFight:
-            announceFight();
+        case Action::YourStats:
+            announceStats(false);
+            break;
+        case Action::OpponentStats:
+            announceStats(true);
+            break;
+        case Action::FightClock:
+            announceClock();
             break;
         case Action::ToggleRadar:
             radar::setEnabled(!radar::enabled());
@@ -2265,7 +2310,7 @@ void start() {
     g_keyConfig = std::make_unique<KeyConfigReader>(g_base);
     if (!g_reader.verifyBuild()) {
         logLine(L"this executable does not match the mod's offsets; narration is off");
-        speech::speak(L"SFAccess: this version of Street Fighter V is not supported yet.", true);
+        speech::speak(L"SSFV: this version of Street Fighter V is not supported yet.", true);
         return;
     }
     radar::start(g_base, g_config);
@@ -2301,4 +2346,4 @@ void shutdown() {
 }
 
 }  // namespace narrator
-}  // namespace sfva
+}  // namespace ssfv

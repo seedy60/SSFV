@@ -8,7 +8,7 @@
 
 #include "common.h"
 
-namespace sfva {
+namespace ssfv {
 namespace {
 
 // Facts about build v07.011, first published by the SFV Access project.
@@ -401,4 +401,4 @@ bool FightReader::read(const std::wstring& leftName, const std::wstring& rightNa
     return true;
 }
 
-}  // namespace sfva
+}  // namespace ssfv

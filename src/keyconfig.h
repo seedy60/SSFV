@@ -6,7 +6,7 @@
 
 #include "object_index.h"
 
-namespace sfva {
+namespace ssfv {
 
 // The button layout the Controller Setting screen is editing. The screen draws
 // each assigned button as a picture, so the text fields hold only the action
@@ -34,4 +34,4 @@ private:
     int64_t nextTryMs_ = 0;
 };
 
-}  // namespace sfva
+}  // namespace ssfv

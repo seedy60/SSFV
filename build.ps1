@@ -38,7 +38,7 @@ $compile = "call `"$vcvars`" >nul && cl /nologo /O2 /MT /EHsc /std:c++17 /W3 /DN
 cmd /c $compile
 if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 
-Copy-Item config\sfvaccess.ini build\sfvaccess.ini -Force
+Copy-Item config\ssfv.ini build\ssfv.ini -Force
 # The NVDA controller client is how speech reaches NVDA; without it beside
 # the mod, speech falls back to SAPI.
 Copy-Item vendor\nvdaControllerClient64.dll build\nvdaControllerClient64.dll -Force
