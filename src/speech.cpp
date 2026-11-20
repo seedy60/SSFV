@@ -21,16 +21,19 @@ namespace {
 
 // Prism's C ABI, as exposed by prism.dll (MPL-2.0). It is output only: it
 // hands a string to whichever screen reader or voice is running.
+using AvailabilityCallback = void(__cdecl*)(void*, uint64_t, const char*, bool);
+using AvailabilityBaselineCallback = void(__cdecl*)(void*);
+
 struct PrismConfig {
     uint8_t version;
     void* registry;
-    void* availability_callback;
+    AvailabilityCallback availability_callback;
     void* availability_userdata;
     uint32_t availability_poll_interval_ms;
     uint32_t availability_debounce_samples;
     uint32_t availability_backoff_max_ms;
     bool availability_auto_power_manage;
-    void* availability_baseline_callback;
+    AvailabilityBaselineCallback availability_baseline_callback;
 };
 
 using ConfigInit = PrismConfig (*)();
@@ -53,7 +56,10 @@ void* g_backend = nullptr;
 BackendOutput g_prismOutput = nullptr;
 BackendStop g_prismStop = nullptr;
 BackendFree g_prismFree = nullptr;
+BackendInitialize g_backendInitialize = nullptr;
+BackendName g_backendNameFn = nullptr;
 RegistryCreate g_registryCreate = nullptr;
+RegistryCreateBest g_registryCreateBest = nullptr;
 RegistryCount g_registryCount = nullptr;
 RegistryIdAt g_registryIdAt = nullptr;
 RegistryIdByName g_registryIdByName = nullptr;
@@ -71,11 +77,21 @@ struct Item {
 };
 
 std::mutex g_lock;
+std::mutex g_backendLock;
 std::condition_variable g_wake;
 std::deque<Item> g_queue;
 std::thread g_worker;
 std::atomic<bool> g_running{false};
+std::atomic<bool> g_reselectRequested{false};
 std::atomic<uint64_t> g_generation{0};
+
+// Runs on Prism's availability poll thread, which must not block. Record the
+// request and let the speech worker do the reselection under its own lock.
+void __cdecl availabilityChanged(void*, uint64_t, const char*, bool available) {
+    if (!available) return;
+    g_reselectRequested.store(true);
+    g_wake.notify_one();
+}
 
 std::wstring prismPath() {
     std::wstring beside = moduleDir() + L"\\prism.dll";
@@ -108,6 +124,46 @@ uint64_t backendId(const std::string& name) {
     return 0;
 }
 
+// A Prism backend is fixed to the reader it connected to. When that reader
+// exits, its calls fail until the backend is destroyed and created again; the
+// same is true when a different reader starts. These helpers own that cycle.
+void releaseBackendLocked() {
+    if (!g_backend) return;
+    if (g_prismStop) g_prismStop(g_backend);
+    if (g_prismFree) g_prismFree(g_backend);
+    g_backend = nullptr;
+    g_backendName = L"none";
+}
+
+bool activateBackendLocked(void* backend) {
+    if (!backend || !g_backendInitialize) return false;
+    int result = g_backendInitialize(backend);
+    // 15 is Prism's "already initialised" result, not a failure.
+    if (result == 15) result = 0;
+    if (result != 0) {
+        logLine(L"prism: backend initialisation returned " + std::to_wstring(result));
+        if (g_prismFree) g_prismFree(backend);
+        return false;
+    }
+    g_backend = backend;
+    const char* name = g_backendNameFn ? g_backendNameFn(backend) : nullptr;
+    g_backendName = name ? wide(name) : L"prism";
+    logLine(L"speech backend: prism (" + g_backendName + L")");
+    return true;
+}
+
+bool selectBestLocked() {
+    if (!g_registryCreateBest || !g_context) return false;
+    return activateBackendLocked(g_registryCreateBest(g_context));
+}
+
+bool recoverBackendLocked() {
+    releaseBackendLocked();
+    if (selectBestLocked()) return true;
+    logLine(L"prism: no usable screen reader or voice backend after reselection");
+    return false;
+}
+
 bool initPrism(const std::wstring& requested) {
     const std::wstring path = prismPath();
     if (path.empty()) return false;
@@ -118,7 +174,7 @@ bool initPrism(const std::wstring& requested) {
     }
     auto configInit = reinterpret_cast<ConfigInit>(GetProcAddress(g_prism, "prism_config_init"));
     auto init = reinterpret_cast<Init>(GetProcAddress(g_prism, "prism_init"));
-    auto registryCreateBest =
+    g_registryCreateBest =
         reinterpret_cast<RegistryCreateBest>(GetProcAddress(g_prism, "prism_registry_create_best"));
     g_registryCreate =
         reinterpret_cast<RegistryCreate>(GetProcAddress(g_prism, "prism_registry_create"));
@@ -130,19 +186,28 @@ bool initPrism(const std::wstring& requested) {
         reinterpret_cast<RegistryIdByName>(GetProcAddress(g_prism, "prism_registry_id"));
     g_registryName =
         reinterpret_cast<RegistryName>(GetProcAddress(g_prism, "prism_registry_name"));
-    auto backendInitialize =
+    g_backendInitialize =
         reinterpret_cast<BackendInitialize>(GetProcAddress(g_prism, "prism_backend_initialize"));
-    auto backendName =
+    g_backendNameFn =
         reinterpret_cast<BackendName>(GetProcAddress(g_prism, "prism_backend_name"));
     g_prismOutput = reinterpret_cast<BackendOutput>(GetProcAddress(g_prism, "prism_backend_output"));
     g_prismStop = reinterpret_cast<BackendStop>(GetProcAddress(g_prism, "prism_backend_stop"));
     g_prismFree = reinterpret_cast<BackendFree>(GetProcAddress(g_prism, "prism_backend_free"));
-    if (!configInit || !init || !registryCreateBest || !backendInitialize || !backendName ||
-        !g_prismOutput) {
+    if (!configInit || !init || !g_registryCreateBest || !g_backendInitialize ||
+        !g_backendNameFn || !g_prismOutput) {
         logLine(L"prism.dll is missing the exports this mod uses");
         return false;
     }
     PrismConfig config = configInit();
+    // A backend is fixed to the reader it connected to, so a reader that
+    // starts later needs a fresh best-backend selection. Prism samples every
+    // backend once a second; two agreeing samples give a starting reader time
+    // to finish registering its COM server before the switch is attempted.
+    config.availability_callback = &availabilityChanged;
+    config.availability_poll_interval_ms = 1000;
+    config.availability_debounce_samples = 2;
+    config.availability_backoff_max_ms = 0;
+    config.availability_auto_power_manage = false;
     g_context = init(&config);
     if (!g_context) {
         logLine(L"prism: initialisation failed");
@@ -159,49 +224,26 @@ bool initPrism(const std::wstring& requested) {
         }
     }
 
-    auto activate = [&](void* backend) {
-        g_backend = backend;
-        if (!g_backend) return false;
-        int result = backendInitialize(g_backend);
-        // 15 is Prism's "already initialised" result, not a failure.
-        if (result == 15) result = 0;
-        if (result != 0) {
-            logLine(L"prism: backend initialisation returned " + std::to_wstring(result));
-            if (g_prismFree) g_prismFree(g_backend);
-            g_backend = nullptr;
-            return false;
-        }
-        return true;
-    };
-
     void* chosen = nullptr;
     if (requestedId && g_registryCreate) {
         chosen = g_registryCreate(g_context, requestedId);
     }
-    if (!activate(chosen)) {
+    if (!activateBackendLocked(chosen)) {
         if (requestedId) logLine(L"prism: requested backend failed; using best");
-        if (!activate(registryCreateBest(g_context))) {
+        if (!selectBestLocked()) {
             logLine(L"prism: no usable screen reader or voice backend");
             return false;
         }
     }
-    const char* name = backendName(g_backend);
-    g_backendName = name ? wide(name) : L"prism";
-    logLine(L"speech backend: prism (" + g_backendName + L")");
     return true;
 }
 
 // SAPI is created on the speech thread, the apartment that will call it.
-bool initSapiOnThisThread() {
-    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
-        logLine(L"SAPI: COM initialisation failed");
-        return false;
-    }
+bool initSapiVoice() {
     if (FAILED(CoCreateInstance(__uuidof(SpVoice), nullptr, CLSCTX_ALL, IID_ISpVoice,
                                 reinterpret_cast<void**>(&g_voice))) ||
         !g_voice) {
         logLine(L"SAPI: no voice available");
-        CoUninitialize();
         return false;
     }
     g_voice->SetRate(g_rate);
@@ -210,20 +252,56 @@ bool initSapiOnThisThread() {
 }
 
 void workerLoop() {
-    const bool comReady = g_useSapi && initSapiOnThisThread();
+    // Prism creates backends on this thread. The JAWS backend needs COM here,
+    // and MTA avoids requiring a message pump on this worker. SAPI keeps its
+    // original apartment.
+    const HRESULT comResult =
+        CoInitializeEx(nullptr, g_useSapi ? COINIT_APARTMENTTHREADED : COINIT_MULTITHREADED);
+    const bool comReady = SUCCEEDED(comResult) || comResult == RPC_E_CHANGED_MODE;
+    const bool comOwned = comResult == S_OK || comResult == S_FALSE;
+    if (!comReady) logLine(L"COM initialisation failed on the speech thread");
+    if (g_useSapi && comReady) initSapiVoice();
     while (true) {
         Item item;
+        bool reselect = false;
         {
             std::unique_lock<std::mutex> lock(g_lock);
-            g_wake.wait(lock, [] { return !g_running || !g_queue.empty(); });
+            g_wake.wait(lock, [] {
+                return !g_running || !g_queue.empty() || g_reselectRequested.load();
+            });
             if (!g_running && g_queue.empty()) break;
-            item = std::move(g_queue.front());
-            g_queue.pop_front();
-            if (item.generation != g_generation.load()) continue;  // superseded
+            if (g_reselectRequested.exchange(false)) {
+                reselect = true;
+            } else {
+                item = std::move(g_queue.front());
+                g_queue.pop_front();
+                if (item.generation != g_generation.load()) continue;  // superseded
+            }
+        }
+        if (reselect) {
+            if (g_prismOutput) {
+                std::lock_guard<std::mutex> lock(g_backendLock);
+                logLine(L"prism: reader availability changed; reselecting backend");
+                recoverBackendLocked();
+            }
+            continue;
         }
         if (g_prismOutput && g_backend) {
             const std::string text = utf8(item.text);
-            g_prismOutput(g_backend, text.c_str(), item.interrupt);
+            std::lock_guard<std::mutex> lock(g_backendLock);
+            if (!g_backend) continue;
+            int result = g_prismOutput(g_backend, text.c_str(), item.interrupt);
+            if (result != 0) {
+                logLine(L"prism: output failed (" + std::to_wstring(result) +
+                        L"); reselecting backend");
+                if (recoverBackendLocked()) {
+                    result = g_prismOutput(g_backend, text.c_str(), item.interrupt);
+                }
+                if (result != 0) {
+                    logLine(L"prism: output failed after reselection (" +
+                            std::to_wstring(result) + L")");
+                }
+            }
         } else if (g_voice) {
             DWORD flags = SPF_ASYNC;
             if (item.interrupt) flags |= SPF_PURGEBEFORESPEAK;
@@ -237,7 +315,7 @@ void workerLoop() {
             }
         }
     }
-    if (comReady) CoUninitialize();
+    if (comOwned) CoUninitialize();
 }
 
 }  // namespace
@@ -293,6 +371,7 @@ void requestStop() {
 }
 
 void stop() {
+    std::lock_guard<std::mutex> lock(g_backendLock);
     if (g_prismStop && g_backend) {
         g_prismStop(g_backend);
     } else if (g_voice) {
@@ -301,6 +380,7 @@ void stop() {
 }
 
 std::wstring backendName() {
+    std::lock_guard<std::mutex> lock(g_backendLock);
     return g_backendName;
 }
 
