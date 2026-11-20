@@ -23,6 +23,7 @@ Config loadConfig() {
     cfg.scanMs = getInt(L"general", L"scan_ms", 400);
     cfg.announceDelayMs = getInt(L"general", L"announce_delay_ms", 80);
     cfg.rate = getInt(L"general", L"speech_rate", 0);
+    cfg.speechBackend = getText(L"general", L"speech_backend", L"auto");
     cfg.narrateInBackground = getInt(L"general", L"narrate_in_background", 0) != 0;
     cfg.logFields = getInt(L"general", L"log_fields", 0) != 0;
     cfg.readBlurbs = getInt(L"general", L"read_blurbs", 0) != 0;

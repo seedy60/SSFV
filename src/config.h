@@ -10,6 +10,7 @@ struct Config {
     int scanMs = 400;          // how often Scaleform's heap is swept for new fields
     int announceDelayMs = 80;  // settle time before a changed screen is spoken
     int rate = 0;              // SAPI rate, -10..10
+    std::wstring speechBackend = L"auto";  // auto, a Prism backend name, or sapi
     bool narrateInBackground = false;
     bool logFields = false;
     bool readBlurbs = false;   // include long Arcade path descriptions

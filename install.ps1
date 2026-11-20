@@ -75,10 +75,9 @@ if (Test-Path $legacyLog) {
 }
 
 Copy-Item (Join-Path $source "xinput1_3.dll") $target -Force
-Copy-Item (Join-Path $source "nvdaControllerClient64.dll") $target -Force
 Copy-Item (Join-Path $source "prism.dll") $target -Force
 New-Item -ItemType File -Force $marker | Out-Null
 if (Test-Path $legacyMarker) { Remove-Item $legacyMarker -Force }
 Write-Host "Installed into $target"
 Write-Host "Start Street Fighter V normally. Log: $target\ssfv-native.log"
-Write-Host "Uninstall: delete $target\xinput1_3.dll, $target\nvdaControllerClient64.dll, $target\ssfv.ini, $target\ssfv-native.log and $target\xinput1_3.dll.ssfv"
+Write-Host "Uninstall: delete $target\xinput1_3.dll, $target\prism.dll, $target\ssfv.ini, $target\ssfv-native.log and $target\xinput1_3.dll.ssfv"

@@ -11,11 +11,12 @@ field's paragraphs, its position on the 1920x1080 stage and the colour it is
 tinted, and reports the field the game has tinted gold. That gold is the
 cursor.
 
-Speech goes to NVDA through NV Access's controller client, which the
-installer copies beside the mod as `nvdaControllerClient64.dll`. With
-`prism.dll` present, Prism is tried first and can reach JAWS or another screen
-reader. When neither is available it falls back to SAPI 5, and
-the log names the backend it chose.
+Speech goes through Prism, which chooses the best available screen reader
+(NVDA, JAWS or another supported reader) or voice. The installer copies
+`prism.dll` beside the mod. `speech_backend=auto` is the default; an explicit
+Prism backend name, or `sapi` for direct Windows SAPI, can be set in
+`ssfv.ini`. SAPI is the fallback when Prism is unavailable, and the log names
+the backend it chose.
 
 The mod never writes to game memory. Only the optional macros send input, and
 only when you press their keys.
@@ -29,10 +30,11 @@ only when you press their keys.
 - Visual Studio 2022 with the C++ workload, only to build
 - [Git for Windows](https://gitforwindows.org/) to clone the repo
 - `prism.dll` from [Prism](https://github.com/ethindp/prism) for
-  screen-reader output through Prism. NVDA needs no extra install; SAPI just works and has no requirements.
+  screen-reader output. Prism reaches a running screen reader or uses another
+  available voice; SAPI is the built-in fallback.
 
-The NVDA controller client in `vendor\` is NV Access's, redistributed under
-the license beside it. Its DLL is copied into the game folder with the mod.
+Prism is vendored in `vendor\`; its DLL is copied into the game folder with
+the mod. No separate NVDA controller client is loaded or installed.
 
 ### Installing
 
@@ -40,7 +42,7 @@ the license beside it. Its DLL is copied into the game folder with the mod.
 2. Extract the zip file to a location of your choosing.
 3. Run install.exe.
 
-The installer copies `xinput1_3.dll`, `nvdaControllerClient64.dll`, `ssfv.ini` and a small marker file into `StreetFighterV\Binaries\Win64`. Pass `-GamePath` if the game is somewhere else. Start the game normally through Steam.
+The installer copies `xinput1_3.dll`, `prism.dll`, `ssfv.ini` and a small marker file into `StreetFighterV\Binaries\Win64`. Pass `-GamePath` if the game is somewhere else. Start the game normally through Steam.
 
 ### Compiling
 
@@ -97,10 +99,21 @@ SSFV features a character radar that allows you to easily gage where your oppone
 | `poll_ms` | 80 | How often the screen is read |
 | `scan_ms` | 400 | How often the heap is swept for new text fields |
 | `announce_delay_ms` | 80 | Settle time before a selection is spoken |
+| `speech_backend` | `auto` | `auto` lets Prism choose; a Prism backend name selects it; `sapi` uses Windows SAPI |
 | `speech_rate` | 0 | SAPI rate, -10 to 10 |
 | `narrate_in_background` | 0 | Keep reading when the game is not in focus |
 | `log_fields` | 0 | Write every field of every announcement to the log |
 | `read_blurbs` | 0 | Read long descriptive blurbs, such as Arcade path stories |
+
+Set the speech backend under `[general]`, for example:
+
+```ini
+[general]
+speech_backend=auto
+```
+
+Use `auto` to let Prism pick, a Prism backend name such as `nvda` or `jaws`
+to force that reader, or `sapi` for Windows SAPI directly.
 
 Radar settings live under `[radar]`: `enabled`, `volume`, `range`, `height`,
 `near_ms`, `far_ms` and `base_hz`. The defaults are 35, 1800, 220, 120, 650

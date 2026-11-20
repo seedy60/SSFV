@@ -1,5 +1,5 @@
 # Builds build\xinput1_3.dll with the Visual C++ toolchain that is installed.
-# The NVDA controller client is vendored, so nothing is downloaded here.
+# Prism is vendored; speech backends are chosen by Prism at runtime.
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -39,9 +39,8 @@ cmd /c $compile
 if ($LASTEXITCODE -ne 0) { throw "Build failed with exit code $LASTEXITCODE" }
 
 Copy-Item config\ssfv.ini build\ssfv.ini -Force
-# The NVDA controller client is how speech reaches NVDA; without it beside
-# the mod, speech falls back to SAPI.
-Copy-Item vendor\nvdaControllerClient64.dll build\nvdaControllerClient64.dll -Force
+# Prism decides which screen reader or voice backend to use. It is loaded
+# beside the mod; SAPI is the built-in fallback.
 Copy-Item vendor\prism.dll build\prism.dll -Force
 Write-Host ""
 Write-Host "Built build\xinput1_3.dll"

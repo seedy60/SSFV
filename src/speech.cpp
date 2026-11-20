@@ -3,8 +3,12 @@
 #include <objbase.h>
 #include <sapi.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <condition_variable>
+#include <cwctype>
+#include <cstring>
 #include <deque>
 #include <mutex>
 #include <thread>
@@ -31,8 +35,12 @@ struct PrismConfig {
 
 using ConfigInit = PrismConfig (*)();
 using Init = void* (*)(PrismConfig*);
-using Shutdown = void (*)(void*);
 using RegistryCreateBest = void* (*)(void*);
+using RegistryCreate = void* (*)(void*, uint64_t);
+using RegistryCount = size_t (*)(void*);
+using RegistryIdAt = uint64_t (*)(void*, size_t);
+using RegistryIdByName = uint64_t (*)(void*, const char*);
+using RegistryName = const char* (*)(void*, uint64_t);
 using BackendInitialize = int (*)(void*);
 using BackendName = const char* (*)(void*);
 using BackendOutput = int (*)(void*, const char*, bool);
@@ -44,20 +52,17 @@ void* g_context = nullptr;
 void* g_backend = nullptr;
 BackendOutput g_prismOutput = nullptr;
 BackendStop g_prismStop = nullptr;
+BackendFree g_prismFree = nullptr;
+RegistryCreate g_registryCreate = nullptr;
+RegistryCount g_registryCount = nullptr;
+RegistryIdAt g_registryIdAt = nullptr;
+RegistryIdByName g_registryIdByName = nullptr;
+RegistryName g_registryName = nullptr;
 std::wstring g_backendName = L"none";
 
 ISpVoice* g_voice = nullptr;
 bool g_useSapi = false;
 int g_rate = 0;
-
-// NVDA's controller client. It is the supported way for another program to
-// hand NVDA a string: NVDA decides the synth, voice and rate.
-typedef long(__stdcall* NvdaTestFn)();
-typedef long(__stdcall* NvdaSpeakFn)(const wchar_t*);
-typedef long(__stdcall* NvdaCancelFn)();
-HMODULE g_nvda = nullptr;
-NvdaSpeakFn g_nvdaSpeak = nullptr;
-NvdaCancelFn g_nvdaCancel = nullptr;
 
 struct Item {
     std::wstring text;
@@ -78,7 +83,32 @@ std::wstring prismPath() {
     return {};
 }
 
-bool initPrism() {
+std::wstring lower(std::wstring text) {
+    for (wchar_t& c : text) c = static_cast<wchar_t>(towlower(c));
+    return text;
+}
+
+// Resolve a backend name through Prism's own registry. Names are published in
+// upper case (NVDA, JAWS, SAPI), so try that first and then compare without
+// case.
+uint64_t backendId(const std::string& name) {
+    std::string upper = name;
+    for (char& c : upper) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    if (g_registryIdByName) {
+        const uint64_t id = g_registryIdByName(g_context, upper.c_str());
+        if (id) return id;
+    }
+    if (!g_registryCount || !g_registryIdAt || !g_registryName) return 0;
+    const size_t count = g_registryCount(g_context);
+    for (size_t i = 0; i < count; ++i) {
+        const uint64_t id = g_registryIdAt(g_context, i);
+        const char* registered = g_registryName(g_context, id);
+        if (registered && _stricmp(registered, upper.c_str()) == 0) return id;
+    }
+    return 0;
+}
+
+bool initPrism(const std::wstring& requested) {
     const std::wstring path = prismPath();
     if (path.empty()) return false;
     g_prism = LoadLibraryW(path.c_str());
@@ -90,12 +120,23 @@ bool initPrism() {
     auto init = reinterpret_cast<Init>(GetProcAddress(g_prism, "prism_init"));
     auto registryCreateBest =
         reinterpret_cast<RegistryCreateBest>(GetProcAddress(g_prism, "prism_registry_create_best"));
+    g_registryCreate =
+        reinterpret_cast<RegistryCreate>(GetProcAddress(g_prism, "prism_registry_create"));
+    g_registryCount =
+        reinterpret_cast<RegistryCount>(GetProcAddress(g_prism, "prism_registry_count"));
+    g_registryIdAt =
+        reinterpret_cast<RegistryIdAt>(GetProcAddress(g_prism, "prism_registry_id_at"));
+    g_registryIdByName =
+        reinterpret_cast<RegistryIdByName>(GetProcAddress(g_prism, "prism_registry_id"));
+    g_registryName =
+        reinterpret_cast<RegistryName>(GetProcAddress(g_prism, "prism_registry_name"));
     auto backendInitialize =
         reinterpret_cast<BackendInitialize>(GetProcAddress(g_prism, "prism_backend_initialize"));
     auto backendName =
         reinterpret_cast<BackendName>(GetProcAddress(g_prism, "prism_backend_name"));
     g_prismOutput = reinterpret_cast<BackendOutput>(GetProcAddress(g_prism, "prism_backend_output"));
     g_prismStop = reinterpret_cast<BackendStop>(GetProcAddress(g_prism, "prism_backend_stop"));
+    g_prismFree = reinterpret_cast<BackendFree>(GetProcAddress(g_prism, "prism_backend_free"));
     if (!configInit || !init || !registryCreateBest || !backendInitialize || !backendName ||
         !g_prismOutput) {
         logLine(L"prism.dll is missing the exports this mod uses");
@@ -107,63 +148,47 @@ bool initPrism() {
         logLine(L"prism: initialisation failed");
         return false;
     }
-    g_backend = registryCreateBest(g_context);
-    if (!g_backend) {
-        logLine(L"prism: no usable screen reader or voice backend");
-        return false;
+    const std::wstring choice = lower(requested);
+    const bool best = choice.empty() || choice == L"auto" || choice == L"prism" ||
+                      choice == L"best";
+    uint64_t requestedId = 0;
+    if (!best) {
+        requestedId = backendId(utf8(choice));
+        if (!requestedId) {
+            logLine(L"prism: backend \"" + requested + L"\" is not registered; using best");
+        }
     }
-    const int result = backendInitialize(g_backend);
-    // 15 is Prism's "already initialised" result, not a failure.
-    if (result != 0 && result != 15) {
-        logLine(L"prism: backend initialisation returned " + std::to_wstring(result));
-        return false;
+
+    auto activate = [&](void* backend) {
+        g_backend = backend;
+        if (!g_backend) return false;
+        int result = backendInitialize(g_backend);
+        // 15 is Prism's "already initialised" result, not a failure.
+        if (result == 15) result = 0;
+        if (result != 0) {
+            logLine(L"prism: backend initialisation returned " + std::to_wstring(result));
+            if (g_prismFree) g_prismFree(g_backend);
+            g_backend = nullptr;
+            return false;
+        }
+        return true;
+    };
+
+    void* chosen = nullptr;
+    if (requestedId && g_registryCreate) {
+        chosen = g_registryCreate(g_context, requestedId);
+    }
+    if (!activate(chosen)) {
+        if (requestedId) logLine(L"prism: requested backend failed; using best");
+        if (!activate(registryCreateBest(g_context))) {
+            logLine(L"prism: no usable screen reader or voice backend");
+            return false;
+        }
     }
     const char* name = backendName(g_backend);
     g_backendName = name ? wide(name) : L"prism";
     logLine(L"speech backend: prism (" + g_backendName + L")");
     return true;
-}
-
-bool initNvda() {
-    const wchar_t* names[] = {L"nvdaControllerClient64.dll", L"nvdaControllerClient.dll"};
-    bool present = false;
-    for (const wchar_t* name : names) {
-        const std::wstring path = moduleDir() + L"\\" + name;
-        if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) continue;
-        present = true;
-        g_nvda = LoadLibraryW(path.c_str());
-        if (!g_nvda) {
-            logLine(L"NVDA client " + std::wstring(name) + L" would not load (error " +
-                    std::to_wstring(GetLastError()) + L")");
-            continue;
-        }
-        auto test = reinterpret_cast<NvdaTestFn>(GetProcAddress(g_nvda, "nvdaController_testIfRunning"));
-        g_nvdaSpeak = reinterpret_cast<NvdaSpeakFn>(GetProcAddress(g_nvda, "nvdaController_speakText"));
-        g_nvdaCancel = reinterpret_cast<NvdaCancelFn>(GetProcAddress(g_nvda, "nvdaController_cancelSpeech"));
-        if (!test || !g_nvdaSpeak) {
-            logLine(L"NVDA client " + std::wstring(name) + L" is missing the controller exports");
-            FreeLibrary(g_nvda);
-            g_nvda = nullptr;
-            g_nvdaSpeak = nullptr;
-            g_nvdaCancel = nullptr;
-            continue;
-        }
-        const long status = test();
-        if (status != 0) {
-            // NVDA is not running, so leave it to SAPI. Clear the pointers:
-            // the worker chooses the backend by looking at them.
-            logLine(L"NVDA controller client loaded but NVDA is not running (status " +
-                    std::to_wstring(status) + L")");
-            g_nvdaSpeak = nullptr;
-            g_nvdaCancel = nullptr;
-            return false;
-        }
-        g_backendName = L"NVDA";
-        logLine(L"speech backend: NVDA (controller client " + std::wstring(name) + L")");
-        return true;
-    }
-    if (!present) logLine(L"NVDA client DLL is not beside the mod; using SAPI");
-    return false;
 }
 
 // SAPI is created on the speech thread, the apartment that will call it.
@@ -199,16 +224,6 @@ void workerLoop() {
         if (g_prismOutput && g_backend) {
             const std::string text = utf8(item.text);
             g_prismOutput(g_backend, text.c_str(), item.interrupt);
-        } else if (g_nvdaSpeak) {
-            if (item.interrupt && g_nvdaCancel) g_nvdaCancel();
-            const long status = g_nvdaSpeak(item.text.c_str());
-            if (status != 0) {
-                static bool reported = false;
-                if (!reported) {
-                    reported = true;
-                    logLine(L"NVDA speakText returned " + std::to_wstring(status));
-                }
-            }
         } else if (g_voice) {
             DWORD flags = SPF_ASYNC;
             if (item.interrupt) flags |= SPF_PURGEBEFORESPEAK;
@@ -227,7 +242,7 @@ void workerLoop() {
 
 }  // namespace
 
-bool init(int rate) {
+bool init(int rate, const std::wstring& backend) {
     auto startWorker = [] {
         g_running = true;
         g_worker = std::thread(workerLoop);
@@ -235,13 +250,14 @@ bool init(int rate) {
         // std::thread destroyed by the CRT at process exit calls terminate.
         g_worker.detach();
     };
-    if (initPrism()) {
+    const std::wstring choice = lower(backend);
+    if (choice == L"sapi") {
+        logLine(L"speech backend: SAPI (configured)");
+    } else if (initPrism(choice)) {
         startWorker();
         return true;
-    }
-    if (initNvda()) {
-        startWorker();
-        return true;
+    } else {
+        logLine(L"speech: Prism is unavailable; using SAPI");
     }
     // SAPI ships with Windows, so this path always exists; it only fails if
     // COM or the voice itself does, and that is logged from the worker.
@@ -279,8 +295,6 @@ void requestStop() {
 void stop() {
     if (g_prismStop && g_backend) {
         g_prismStop(g_backend);
-    } else if (g_nvdaCancel) {
-        g_nvdaCancel();
     } else if (g_voice) {
         g_voice->Speak(nullptr, SPF_PURGEBEFORESPEAK | SPF_ASYNC, nullptr);
     }

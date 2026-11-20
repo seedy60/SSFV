@@ -52,6 +52,8 @@ std::deque<Action> g_actions;
 std::vector<std::wstring> g_lastLines;
 int g_reviewIndex = -1;
 std::wstring g_lastKey;
+std::wstring g_lastSpokenSelection;
+bool g_selectionMoved = false;
 std::wstring g_pendingKey;
 std::wstring g_pendingGridKey;
 Clock::time_point g_pendingGridAt;
@@ -59,6 +61,9 @@ std::wstring g_lastGridKey;
 std::wstring g_pendingStageKey;
 Clock::time_point g_pendingStageAt;
 std::wstring g_lastStageKey;
+std::wstring g_pendingRandomKey;
+Clock::time_point g_pendingRandomAt;
+std::wstring g_lastRandomKey;
 Clock::time_point g_stageSelectSeen = Clock::time_point::min();
 bool g_stageMoved = false;
 float g_lastControllerX = -1.0f;
@@ -78,7 +83,12 @@ bool g_storyCardFallbackDone = false;
 Clock::time_point g_storyCardLostAt = Clock::time_point::min();
 Clock::time_point g_pendingAt;
 std::wstring g_lastFooter;
+std::wstring g_lastOptionScreen;
+std::wstring g_lastOptionLabel;
+std::wstring g_lastOptionValue;
+bool g_pendingOptionValueOnly = false;
 std::set<std::wstring> g_previousShown;
+std::set<std::wstring> g_creditsSpoken;
 std::vector<std::wstring> g_pendingTexts;
 Clock::time_point g_pendingTextsAt;
 Clock::time_point g_lastSpokenAt;
@@ -195,6 +205,29 @@ std::wstring stageNameLabel(const std::wstring& text) {
     return trim(text) == L"???" ? L"Random stage" : text;
 }
 
+// Arcade's automatic stage change draws the stage-select heading with a
+// leading cursor mark ("*STAGE SELECT") instead of the plain title used in
+// Battle Settings. Strip that decoration so both forms identify the screen.
+bool isStageSelectHeading(const std::wstring& text) {
+    std::wstring t = trim(text);
+    while (!t.empty() && !iswalpha(t.front())) t.erase(t.begin());
+    return t == L"STAGE SELECT";
+}
+
+// Training and Arcade draw the stage panel as one concatenated caption:
+// "STAGE SELECT. Forgotten Waterfall. Weather | Clear. RYU. LV 99...".
+// The caption marks the screen even when the plain heading was not painted
+// separately.
+bool stageSelectCaption(const std::wstring& text) {
+    const std::wstring t = trim(text);
+    size_t start = 0;
+    while (start < t.size() && !iswalpha(t[start])) ++start;
+    if (t.compare(start, 12, L"STAGE SELECT") != 0) return false;
+    const size_t after = start + 12;
+    if (after >= t.size()) return false;  // the plain heading
+    return !iswalpha(t[after]);          // more text after the heading
+}
+
 bool readingOrder(const Field& a, const Field& b) {
     const long ay = std::lround(a.y / 12.0f);
     const long by = std::lround(b.y / 12.0f);
@@ -203,6 +236,17 @@ bool readingOrder(const Field& a, const Field& b) {
 }
 
 bool isCharacterSelect(const std::vector<Field>& shown);
+
+// The shared character/stage movie also shows a version-select panel with the
+// same roster. Its hidden *STAGE SELECT tab must not make the stage panel
+// look like it is returning while the player is still choosing a character.
+bool isVersionSelect(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (field.tint[3] <= 0.01f) continue;
+        if (trim(field.text) == L"VERSION SELECT") return true;
+    }
+    return false;
+}
 
 std::vector<Field> onScreen(const std::vector<Field>& fields) {
     std::vector<Field> shown;
@@ -236,19 +280,19 @@ std::vector<Field> onScreen(const std::vector<Field>& fields) {
     if (hiddenConditionLabels.size() < 2) {
         for (const auto& field : fields) {
             if (!field.hidden || !field.rooted || field.chain.size() < 2) continue;
-            if (trim(field.text) != L"STAGE SELECT" && !randomStageName(field)) continue;
+            if (!isStageSelectHeading(field.text) && !randomStageName(field)) continue;
             for (uintptr_t parent : field.hiddenBy) stagePanels.insert(parent);
         }
     }
     if (!stagePanels.empty()) {
-        const bool characterVisible = isCharacterSelect(shown);
+        const bool characterVisible = isCharacterSelect(shown) || isVersionSelect(shown);
         bool stageVisible = false;
         bool opaqueShown = false;
         bool characterRemnant = false;
         for (const auto& field : shown) {
             const std::wstring text = trim(field.text);
             if (field.tint[3] > 0.01f) opaqueShown = true;
-            if (text == L"STAGE SELECT") stageVisible = true;
+            if (isStageSelectHeading(field.text)) stageVisible = true;
             if (randomStageName(field)) stageVisible = true;
             std::wstring label;
             if (stageConditionLabel(field.text, label)) stageVisible = true;
@@ -479,6 +523,168 @@ bool characterSelectLabels(std::vector<std::wstring>& lines) {
         return true;
     }
     return false;
+}
+
+// Screens whose title sits above their option rows. The title is context, not
+// part of the row, and repeating it on every cursor move is noise.
+std::wstring optionScreenTitle(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        // The OPTIONS menu also contains rows named "Sound Settings" and
+        // "Screen Settings", but those are at x~157. The real screen title
+        // sits in the panel at x~410 and may have a suffix such as
+        // "Screen Settings ( : Switch Samples)".
+        if (field.x < 300.0f) continue;
+        const std::wstring text = trim(field.text);
+        if (text.rfind(L"Sound Settings", 0) == 0 ||
+            text.rfind(L"Screen Settings", 0) == 0 ||
+            text.rfind(L"Other Settings", 0) == 0 ||
+            text.rfind(L"Graphics Settings", 0) == 0) {
+            return text;
+        }
+    }
+    return {};
+}
+
+// Skip the credits handler while an OPTIONS sub-screen is open. Its menu row
+// "Credits" remains visible behind the panel, but its control labels are in
+// the x>=300 panel area.
+bool optionSubscreen(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (field.x < 300.0f) continue;
+        const std::wstring text = trim(field.text);
+        if (text.rfind(L"Sound Settings", 0) == 0 ||
+            text.rfind(L"Screen Settings", 0) == 0 ||
+            text.rfind(L"Graphics Settings", 0) == 0 ||
+            text.rfind(L"Other Settings", 0) == 0 ||
+            text == L"Adjust Upper HUD Position" ||
+            text == L"Adjust Lower HUD Position" ||
+            text == L"Restore Defaults") {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Challenges > Demonstrations uses the screen heading "Demonstrations" above
+// its volume and lesson rows. The heading is context, not part of every row.
+bool isDemonstrationScreen(const std::vector<Field>& shown) {
+    bool title = false;
+    bool row = false;
+    for (const auto& field : shown) {
+        const std::wstring text = trim(field.text);
+        if (text == L"Demonstrations") title = true;
+        if (text.rfind(L"VOL. ", 0) == 0 ||
+            (text.size() > 2 && text[0] == L'#' && iswdigit(text[1])) ||
+            text == L"Start Demonstration" || text == L"Proceed" ||
+            text == L"Return to Demonstration Select" ||
+            text.rfind(L"DEMONSTRATION TIPS", 0) == 0) {
+            row = true;
+        }
+    }
+    return title && row;
+}
+
+// These battle-setting rows also pair a label with an editable value, but they
+// are not under a Sound/Screen Settings title.
+bool battleOptionLabel(const std::wstring& text) {
+    return text == L"Round Settings" || text == L"Match Time Settings" ||
+           text == L"CPU Difficulty" || text == L"Sponsor Display" ||
+           text == L"Loading & Stage Ads";
+}
+
+struct OptionSelection {
+    bool valid = false;
+    std::wstring screen;
+    std::wstring label;
+    std::wstring value;
+};
+
+// Find the row carrying the cursor. The title and the row's label/value are
+// separate fields, and the value can be outside the gold subset, so use the
+// selected label's y position to find the value on the same line.
+OptionSelection optionSelection(const std::vector<Field>& shown,
+                                const std::vector<const Field*>& selectedFields) {
+    OptionSelection selection;
+    const Field* title = nullptr;
+    selection.screen = optionScreenTitle(shown);
+    if (!selection.screen.empty()) {
+        for (const auto& field : shown) {
+            if (trim(field.text) == selection.screen) {
+                title = &field;
+                break;
+            }
+        }
+    }
+
+    std::vector<const Field*> labels;
+    if (title) {
+        for (const Field* field : selectedFields) {
+            if (!field || field == title) continue;
+            if (trim(field->text).empty()) continue;
+            if (field->y <= title->y + 10.0f || field->y >= 900.0f) continue;
+            labels.push_back(field);
+        }
+    } else {
+        for (const Field* field : selectedFields) {
+            if (!field) continue;
+            if (!battleOptionLabel(trim(field->text))) continue;
+            labels.push_back(field);
+        }
+    }
+    if (labels.empty()) return selection;
+    std::sort(labels.begin(), labels.end(), [](const Field* a, const Field* b) {
+        if (a->y != b->y) return a->y < b->y;
+        return a->x < b->x;
+    });
+
+    const Field* label = labels.front();
+    // A selected row normally contributes two fields: its label and its value.
+    // If only the label is selected, look for the nearest text to its right on
+    // the same line. That is where these option screens draw the value.
+    const Field* value = nullptr;
+    for (const Field* other : labels) {
+        if (other == label) continue;
+        if (std::fabs(other->y - label->y) > 5.0f) continue;
+        if (other->x <= label->x) continue;
+        if (!value || other->x < value->x) value = other;
+    }
+    if (!value) {
+        for (const auto& other : shown) {
+            if (&other == label || &other == title) continue;
+            if (std::fabs(other.y - label->y) > 5.0f) continue;
+            if (other.x <= label->x) continue;
+            if (trim(other.text).empty()) continue;
+            // Values are commonly bare numbers, so do not run the menu-text
+            // filter here; a long field on the same line is a description.
+            if (other.text.size() > 80) continue;
+            if (!value || other.x < value->x) value = &other;
+        }
+    }
+    selection.label = trim(label->text);
+    if (value) {
+        selection.value = trim(value->text);
+    }
+    // A few labels arrive as one string, such as "BGM Volume 4". Split the
+    // last token only when it looks like a value, not part of a long name.
+    if (selection.value.empty() && !selection.label.empty()) {
+        const size_t split = selection.label.find_last_of(L' ');
+        if (split != std::wstring::npos) {
+            const std::wstring last = selection.label.substr(split + 1);
+            bool numeric = !last.empty();
+            for (wchar_t c : last) {
+                if (!iswdigit(c) && c != L'%') {
+                    numeric = false;
+                    break;
+                }
+            }
+            if (numeric || last == L"ON" || last == L"OFF") {
+                selection.value = last;
+                selection.label = trim(selection.label.substr(0, split));
+            }
+        }
+    }
+    selection.valid = !selection.label.empty() && !selection.value.empty();
+    return selection;
 }
 
 // The main menu's bottom row of icons is text too, and it is not gold either.
@@ -849,6 +1055,109 @@ bool tipCounter(const std::wstring& text) {
     return false;
 }
 
+bool creditsMenu(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (trim(field.text) == L"Credits") return true;
+    }
+    return false;
+}
+
+bool hasViewCreditsFooter(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (trim(field.text) == L"View Credits.") return true;
+    }
+    return false;
+}
+
+// The OPTIONS menu always has a visible description line at x~110, y~992.
+// The active credits page does not, and this distinguishes it from merely
+// moving the cursor to Graphics Settings (which also lacks the Credits
+// description but is still the menu).
+bool hasOptionFooter(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (field.x < 80.0f || field.x > 200.0f) continue;
+        if (field.y < 950.0f || field.y > 1050.0f) continue;
+        if (!trim(field.text).empty()) return true;
+    }
+    return false;
+}
+
+// The credits names are laid out in a tall strip outside the 1080p viewport;
+// the movie scrolls that strip through a mask rather than moving the fields.
+// On the active credits page the menu row remains but the "View Credits."
+// footer is gone, so read the strip even when none of its fields happen to be
+// inside the normal 1080p filter. Once one visible credit line appears, also
+// accept the strip; the full-screen variant can hide the menu row.
+bool handleCreditsScreen(const std::vector<Field>& shown) {
+    if (optionSubscreen(shown)) {
+        g_creditsSpoken.clear();
+        return false;
+    }
+    const bool menu = creditsMenu(shown);
+    const bool viewFooter = hasViewCreditsFooter(shown);
+    const bool optionFooter = hasOptionFooter(shown);
+    const auto fields = g_reader.read();
+    bool visibleCredit = false;
+    for (const auto& field : shown) {
+        if (!field.rooted || field.x >= 100.0f) continue;
+        if (trim(field.text).empty()) continue;
+        if (field.y < 0.0f || field.y >= 1080.0f) continue;
+        visibleCredit = true;
+        break;
+    }
+    if (!menu && !visibleCredit) {
+        g_creditsSpoken.clear();
+        return false;
+    }
+
+    std::vector<std::pair<float, std::wstring>> parts;
+    bool creditStrip = false;
+    for (const auto& field : fields) {
+        if (!field.rooted || field.x >= 100.0f) continue;
+        // Skip the hidden clock/date fields: they also sit at x<100 and would
+        // otherwise be prepended to the credits.
+        if (field.y < 100.0f) continue;
+        const std::wstring text = trim(field.text);
+        if (text.empty()) continue;
+        // A stage preview uses a run of W characters as a mask at this x.
+        // It is decoration, not a credit line.
+        size_t letters = 0;
+        size_t ws = 0;
+        for (wchar_t c : text) {
+            if (iswspace(c)) continue;
+            ++letters;
+            if (c == L'w' || c == L'W') ++ws;
+        }
+        if (letters >= 8 && ws * 5 >= letters * 4) continue;
+        parts.push_back({field.y, text});
+        if (field.y >= 1080.0f) creditStrip = true;
+    }
+    // The active credits page loads this low-x strip even though all of its
+    // fields are outside the normal viewport; the OPTIONS menu normally has
+    // none of it. This is the reliable signal while the Credits row and its
+    // footer are still drawn on top of the page.
+    const bool active = menu && (creditStrip || (!viewFooter && !optionFooter));
+    // A low-x field behind the OPTIONS menu is background art, not the active
+    // credits page. The menu-less full-screen credits roll is the tall strip
+    // outside the viewport; stage select's left-edge panel is inside it.
+    if (!active && (!creditStrip || !visibleCredit || parts.size() < 10)) {
+        if (menu) g_creditsSpoken.clear();
+        return false;
+    }
+    std::sort(parts.begin(), parts.end(), [](const auto& a, const auto& b) {
+        if (a.first != b.first) return a.first < b.first;
+        return a.second < b.second;
+    });
+    std::vector<std::wstring> lines;
+    for (const auto& [y, text] : parts) {
+        (void)y;
+        if (!g_creditsSpoken.insert(text).second) continue;
+        lines.push_back(text);
+    }
+    if (!lines.empty()) say(lines, true);
+    return true;
+}
+
 bool handleTipsScreen(const std::vector<Field>& shown, Clock::time_point now) {
     const Field* heading = nullptr;
     for (const auto& field : shown) {
@@ -918,12 +1227,26 @@ bool copyrightNotice(const std::wstring& text) {
            t.find(L"ALL RIGHTS RESERVED") != std::wstring::npos;
 }
 
+// The build number is painted near the title and can briefly appear as new
+// text while a screen changes. It is not a menu item.
+bool versionLabel(const std::wstring& text) {
+    const std::wstring t = trim(text);
+    if (t.rfind(L"Ver.", 0) != 0 || t.size() <= 4) return false;
+    for (size_t i = 4; i < t.size(); ++i) {
+        if (!iswdigit(t[i]) && t[i] != L'.') return false;
+    }
+    return true;
+}
+
 // HUD counters, damage totals and lone symbols are not menu text. Reading
 // every new two- or three-digit field made a fight announce "500", "600" and
 // "70" over the action. A line with no letters and only a few characters is
 // an instrument, not an announcement.
 bool worthAnnouncing(const std::wstring& text) {
-    if (gameOverOverlay(text) || copyrightNotice(text) || tipCounter(text)) return false;
+    if (gameOverOverlay(text) || copyrightNotice(text) || versionLabel(text) ||
+        tipCounter(text)) {
+        return false;
+    }
     bool allDigits = true;
     for (wchar_t c : text) {
         if (iswalpha(c)) return true;
@@ -966,6 +1289,20 @@ bool confirmationQuestion(const std::vector<Field>& shown) {
         if (field.text.find(L'?') == std::wstring::npos) continue;
         if (!worthAnnouncing(field.text)) continue;
         return true;
+    }
+    return false;
+}
+
+// The title-screen close prompt can lose one of its two buttons for a poll
+// while the focused one is rebuilt. The question identifies the prompt even
+// when only one of Yes/No is on screen, so the gold EXIT row behind it is not
+// read in the gap.
+bool closeConfirmation(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (field.tint[3] <= 0.01f || field.gold()) continue;
+        if (spoken(field.text).find(L"close the application") != std::wstring::npos) {
+            return true;
+        }
     }
     return false;
 }
@@ -1022,6 +1359,83 @@ bool isBattleSettingItem(const std::wstring& text) {
 
 bool isBattleGridHeader(const std::wstring& text) {
     return text == L"ALL" || text.find(L"Additional Stages") != std::wstring::npos;
+}
+
+// The Battle Settings landing screen (not one of its grids) has the title in
+// the left panel and the settings rows beneath it.
+bool isBattleSettingsScreen(const std::vector<Field>& shown) {
+    for (const auto& field : shown) {
+        if (field.x >= 700.0f || field.y >= 220.0f) continue;
+        if (trim(field.text) == L"Battle Settings") return true;
+    }
+    return false;
+}
+
+bool battleSettingsGrid(const std::vector<Field>& shown, std::wstring& line);
+
+// The Random Stage Settings row is sometimes the only bright row on the
+// Battle Settings landing screen but the generic selection path does not see
+// it, so read the row directly rather than relying on that path.
+bool handleRandomStageOption(const std::vector<Field>& shown, Clock::time_point now) {
+    if (!isBattleSettingsScreen(shown)) {
+        g_pendingRandomKey.clear();
+        g_lastRandomKey.clear();
+        return false;
+    }
+    // A Battle Settings grid or stage picker can leave the landing rows
+    // visible behind it. Let those handlers read the grid instead.
+    bool stageConditions = false;
+    int conditionCount = 0;
+    for (const auto& field : shown) {
+        if (isStageSelectHeading(field.text)) return false;
+        if (randomStageName(field)) return false;
+        std::wstring condition;
+        if (stageConditionLabel(field.text, condition)) ++conditionCount;
+    }
+    stageConditions = conditionCount >= 2;
+    std::wstring gridLine;
+    if (stageConditions || battleSettingsGrid(shown, gridLine)) return false;
+
+    const Field* random = nullptr;
+    for (const auto& field : shown) {
+        if (trim(field.text) != L"Random Stage Settings") continue;
+        if (field.gold() || field.listSelected) {
+            random = &field;
+            break;
+        }
+    }
+    const Field* footer = nullptr;
+    for (const auto& field : shown) {
+        if (field.x >= 400.0f || field.y < 960.0f) continue;
+        if (trim(field.text).empty()) continue;
+        footer = &field;
+        break;
+    }
+    const bool described =
+        footer && footer->text.find(L"Adjust which stages can be picked") != std::wstring::npos;
+    if (!random && !described) {
+        g_pendingRandomKey.clear();
+        g_lastRandomKey.clear();
+        return false;
+    }
+    std::vector<std::wstring> lines{L"Random Stage Settings"};
+    // During a transition the bottom-left field can still hold the Battle
+    // Settings description. Only append the Random row's own description.
+    if (described && footer) lines.push_back(footer->text);
+    const std::wstring key = join(lines);
+    if (key != g_pendingRandomKey) {
+        g_pendingRandomKey = key;
+        g_pendingRandomAt = now + std::chrono::milliseconds(g_config.announceDelayMs);
+        return true;
+    }
+    if (now < g_pendingRandomAt || key == g_lastRandomKey) return true;
+    say(lines, true);
+    // This row bypasses the normal selection path. Mark that the cursor moved
+    // so returning to the previous row (Favorite Stage) is read again instead
+    // of being mistaken for the same row redrawing.
+    g_selectionMoved = true;
+    g_lastRandomKey = key;
+    return true;
 }
 
 // The preview panel beside these grids repeats the same labels on every
@@ -1155,7 +1569,8 @@ bool isStageSelect(const std::vector<Field>& shown) {
     // during the stage-change transition.
     std::set<std::wstring> labels;
     for (const auto& field : shown) {
-        if (field.y < 200.0f && trim(field.text) == L"STAGE SELECT") return true;
+        if (isStageSelectHeading(field.text)) return true;
+        if (stageSelectCaption(field.text)) return true;
         if (randomStageName(field)) return true;
         std::wstring label;
         if (stageConditionLabel(field.text, label)) labels.insert(label);
@@ -1184,8 +1599,9 @@ bool stageSelectLine(const std::vector<Field>& shown, std::wstring& line) {
             break;
         }
     }
-    if (labels.size() < 2) {
-        // The random stage has no weather, time or temperature fields.
+    // Training's stage select shows only one condition, so a single label is
+    // enough to look for the stage title. The random stage has none.
+    if (labels.empty()) {
         if (random) {
             line = L"Random stage";
             return true;
@@ -1193,18 +1609,36 @@ bool stageSelectLine(const std::vector<Field>& shown, std::wstring& line) {
         return false;
     }
 
+    // The large right-hand title is the stage under the cursor. The copy at
+    // the left edge of the preview is the favourite and can arrive truncated
+    // ("Union" for "Union Station"), so prefer the right-hand slot.
     const Field* name = nullptr;
-    int nearest = std::numeric_limits<int>::max();
     for (const auto& field : shown) {
+        if (field.x < 1000.0f || field.x >= 1400.0f) continue;
+        if (field.y < 540.0f || field.y >= 620.0f) continue;
         const std::wstring text = trim(field.text);
-        if (text.empty() || text == L"STAGE SELECT" || !worthAnnouncing(text)) continue;
+        if (text.empty() || text == L"???" || !worthAnnouncing(text)) continue;
         std::wstring ignored;
-        if (stageConditionLabel(text, ignored)) continue;
-        for (const Field* condition : conditions) {
-            const int distance = treeDistance(field.chain, condition->chain);
-            if (distance < nearest) {
-                nearest = distance;
-                name = &field;
+        if (stageConditionLabel(text, ignored) || stageSelectCaption(text)) continue;
+        name = &field;
+        break;
+    }
+    if (!name) {
+        int nearest = std::numeric_limits<int>::max();
+        for (const auto& field : shown) {
+            const std::wstring text = trim(field.text);
+            if (text.empty() || isStageSelectHeading(text) || !worthAnnouncing(text)) continue;
+            // The concatenated caption repeats the whole panel; it is not the
+            // stage title under the cursor.
+            if (stageSelectCaption(text)) continue;
+            std::wstring ignored;
+            if (stageConditionLabel(text, ignored)) continue;
+            for (const Field* condition : conditions) {
+                const int distance = treeDistance(field.chain, condition->chain);
+                if (distance < nearest) {
+                    nearest = distance;
+                    name = &field;
+                }
             }
         }
     }
@@ -1231,6 +1665,7 @@ bool handleStageSelect(const std::vector<Field>& shown, Clock::time_point now) {
         }
         if (g_stageSelectSeen != Clock::time_point::min() &&
             now - g_stageSelectSeen < std::chrono::milliseconds(750)) {
+            g_pendingTexts.clear();
             return true;
         }
         clearStageSelectState();
@@ -1241,8 +1676,11 @@ bool handleStageSelect(const std::vector<Field>& shown, Clock::time_point now) {
     std::wstring line;
     if (!stageSelectLine(shown, line)) {
         // The conditions can be up for a poll before the name paints. Hold the
-        // screen rather than falling through to generic text.
+        // screen rather than falling through to generic text. Text collected
+        // while the panel was still painting must not leak out as menu text
+        // when the screen closes.
         g_pendingStageKey.clear();
+        g_pendingTexts.clear();
         return true;
     }
     const std::wstring key = L"stage\x1f" + line;
@@ -1365,9 +1803,10 @@ void announceClock() {
 // radar as soon as one of those rows is visible.
 bool isPauseMenu(const std::vector<Field>& shown) {
     static const wchar_t* kRows[] = {
-        L"Resume", L"RESUME", L"PAUSE", L"Controller Setting", L"Command List",
-        L"Training Settings", L"Sound Settings", L"Button Configuration",
-        L"Return to Main Menu",
+        L"Resume", L"RESUME", L"PAUSE", L"PAUSE MENU", L"Controller Setting",
+        L"Command List", L"Training Settings", L"Sound Settings",
+        L"Button Configuration", L"Return to Main Menu", L"Go to Main Menu",
+        L"Return to Demonstration Select",
     };
     for (const auto& field : shown) {
         const std::wstring text = trim(field.text);
@@ -1522,6 +1961,11 @@ void snapshot() {
 void poll(std::vector<Field> shown) {
     g_reader.markChoices(shown);
     g_reader.markCommandRow(shown);
+    // Stage select's caption arrives faded while the character preview drawn
+    // by the same movie stays bright. Keep the unfiltered copy for the stage
+    // handler so the panel is recognized and held instead of being dumped as
+    // new menu text.
+    const std::vector<Field> stageShown = shown;
     dropFaded(shown);
     g_shownCount = shown.size();
     if (shown.empty()) {
@@ -1532,15 +1976,31 @@ void poll(std::vector<Field> shown) {
         return;
     }
 
+    // Stage select and character select draw their panels at the left edge,
+    // where the credits reader looks for its strip. Letting it run there
+    // dumps the whole panel and reads truncated preview names such as
+    // "Union" from "Union Station".
+    const bool castingScreen = isStageSelect(stageShown) || isCharacterSelect(stageShown);
+    if (castingScreen) g_creditsSpoken.clear();
+
+    // Credits are a masked, scrolling strip outside the normal viewport, so
+    // they need their own reader before the generic selection path sees the
+    // Credits menu row.
+    if (!castingScreen && handleCreditsScreen(shown)) return;
+
     // A tips screen has a heading and a body under one holder, with no
     // selected row. Read the pair as one announcement before the generic
     // "new text" path can say the heading and its TIP label alone.
     if (handleTipsScreen(shown, Clock::now())) return;
 
+    // Read the Random Stage Settings row before the grid/stage handlers can
+    // consume it as a grid or stage-preview transition.
+    if (handleRandomStageOption(shown, Clock::now())) return;
+
     // Battle Settings' picture grids mark the cursor with brightness rather
     // than the gold used by ordinary menu rows.
     if (handleBattleGrid(shown, Clock::now())) return;
-    if (handleStageSelect(shown, Clock::now())) return;
+    if (handleStageSelect(stageShown, Clock::now())) return;
 
     // The Character Story tab is gold for the whole screen. Once the card
     // grid has painted, treat the tab as context rather than as the selected
@@ -1583,8 +2043,9 @@ void poll(std::vector<Field> shown) {
     }
     const bool anyChosen = chosenGroup != 0;
     const bool pauseMenu = isPauseMenu(shown);
-    if (!anyChosen && pauseMenu &&
-        (confirmationPrompt(shown) || confirmationQuestion(shown))) {
+    if (!anyChosen &&
+        (confirmationPrompt(shown) || closeConfirmation(shown) ||
+         (pauseMenu && confirmationQuestion(shown)))) {
         // The prompt is between repaints, or its replacement button has not
         // been marked yet. Hold instead of reading the gold menu row that is
         // still visible behind it. Once the structural choice returns, the
@@ -1650,6 +2111,7 @@ void poll(std::vector<Field> shown) {
     const bool opponentSelect = characterSelect && isOpponentSelect(shown);
 
     std::vector<std::wstring> selected;
+    std::vector<const Field*> selectedFields;
     std::set<std::wstring> selectedTexts;
     const Field* selectedField = nullptr;
     bool unavailableFocus = false;
@@ -1665,9 +2127,11 @@ void poll(std::vector<Field> shown) {
     for (const auto& field : shown) {
         if (gameOverOverlay(field.text) || copyrightNotice(field.text) ||
             tipCounter(field.text)) continue;
-        if (controllerSetting && field.x < 700.0f &&
-            (trim(field.text) == L"Controller Setting" ||
-             trim(field.text) == L"Controller Settings")) {
+        if (controllerSetting &&
+            ((field.x < 700.0f &&
+              (trim(field.text) == L"Controller Setting" ||
+               trim(field.text) == L"Controller Settings")) ||
+             trim(field.text) == L"Controller")) {
             continue;
         }
         if (versusMode && trim(field.text) == L"Controller Settings") continue;
@@ -1683,6 +2147,7 @@ void poll(std::vector<Field> shown) {
             continue;
         }
         if (lit) {
+            if (versionLabel(field.text)) continue;
             if (characterStory && g_storyGrid && isStoryTab(field)) continue;
             // Character select's heading and CPU tag are labels on the screen,
             // not the fighter under the cursor. Only the fighter name is read.
@@ -1704,12 +2169,28 @@ void poll(std::vector<Field> shown) {
             if ((controllerSetting || pauseMenu) && isUnavailableRow(field)) {
                 text += L", unavailable";
             }
+            selectedFields.push_back(&field);
             if (selectedTexts.insert(text).second) selected.push_back(text);
         }
         if (!anyChosen && !footer && field.y >= 960.0f && field.x < 400.0f &&
-            !copyrightNotice(field.text) && !gameOverOverlay(field.text) &&
-            !tipCounter(field.text)) {
+            !copyrightNotice(field.text) && !versionLabel(field.text) &&
+            !gameOverOverlay(field.text) && !tipCounter(field.text)) {
             footer = &field;
+        }
+    }
+    // Random Stage Settings can be drawn as a bright row while the generic
+    // gold/list-focus selection path misses it. It is a real Battle Settings
+    // row, so make sure the bright row is in the selected set.
+    if (isBattleSettingsScreen(shown)) {
+        for (const auto& field : shown) {
+            if (!field.gold() && !field.listSelected) continue;
+            const std::wstring text = trim(field.text);
+            if (text != L"Random Stage Settings") continue;
+            if (std::find(selected.begin(), selected.end(), text) != selected.end()) break;
+            selected.push_back(text);
+            selectedFields.push_back(&field);
+            if (!selectedField) selectedField = &field;
+            break;
         }
     }
     // On the Controller Settings overlay, moving onto a disabled entry can
@@ -1751,7 +2232,9 @@ void poll(std::vector<Field> shown) {
     // "Network Match Fight Request Settings, unavailable" between two ordinary
     // rows. The Controller Settings overlay still needs the notes because its
     // disabled actions can otherwise vanish silently.
-    const bool skippedNotes = !pauseMenu || controllerSetting;
+    // Do not prepend a disabled row that the cursor merely passed over. The
+    // selected row itself still reads with ", unavailable" when focused.
+    const bool skippedNotes = !pauseMenu && !controllerSetting;
     if (skippedNotes && listMenu && selectedField && lastListX >= 0.0f && lastListY >= 0.0f &&
         !pauseWrapped && std::fabs(selectedField->x - lastListX) < 60.0f &&
         std::fabs(selectedField->y - lastListY) > 1.0f) {
@@ -1769,6 +2252,30 @@ void poll(std::vector<Field> shown) {
         }
     }
     std::wstring footerText = footer ? footer->text : L"";
+    if (controllerSetting && trim(footerText) == L"Controller") footerText.clear();
+
+    // On the Sound Settings and Screen Settings screens a left/right change
+    // alters only the value. Remember the row so that a value change is spoken
+    // alone, while moving to a different row still reads its label.
+    OptionSelection option;
+    bool optionValueOnly = false;
+    const std::wstring optionTitle = optionScreenTitle(shown);
+    if (!selected.empty()) {
+        option = optionSelection(shown, selectedFields);
+    }
+    if (option.valid) {
+        optionValueOnly = g_lastOptionScreen == option.screen &&
+                          g_lastOptionLabel == option.label &&
+                          !g_lastOptionValue.empty() && g_lastOptionValue != option.value;
+        g_lastOptionScreen = option.screen;
+        g_lastOptionLabel = option.label;
+        g_lastOptionValue = option.value;
+    } else {
+        g_lastOptionScreen.clear();
+        g_lastOptionLabel.clear();
+        g_lastOptionValue.clear();
+        g_pendingOptionValueOnly = false;
+    }
 
     // What is new since the previous read. A dialog's text arrives this way;
     // a selection move changes these keys too, but is spoken from the
@@ -1983,6 +2490,10 @@ void poll(std::vector<Field> shown) {
         if (anyChosen) {
             key += L"\x1f" + std::to_wstring(chosenGroup) + L"\x1f" + questionKey;
         }
+        if (option.valid) {
+            key += L"\x1foption\x1f" + option.screen + L"\x1f" + option.label + L"\x1f" +
+                   option.value;
+        }
 
         if (storyRestored) {
             // The grid only exposes the synthesized card for one poll. Do not
@@ -1993,7 +2504,17 @@ void poll(std::vector<Field> shown) {
                 if (g_config.logFields && isMainMenu(shown)) {
                     logLine(L"menu selected: " + key);
                 }
+                // Remember that the row actually changed. Moving down and
+                // straight back up must read the row again instead of being
+                // swallowed by the g_lastKey/recentlySaid redraw guards.
+                if (join(selected) != g_lastSpokenSelection) {
+                    g_selectionMoved = true;
+                }
                 g_pendingKey = key;
+                // Keep "only the value" through the settle delay. The next
+                // poll has the same value, so recomputing it there would fall
+                // back to the whole row.
+                g_pendingOptionValueOnly = optionValueOnly;
                 // A badge-only poll can be the random tile, or it can be the
                 // player tag that paints a frame before a fighter's name. Give
                 // the name time to arrive before naming the random slot.
@@ -2011,27 +2532,54 @@ void poll(std::vector<Field> shown) {
                 g_pendingAt = now + std::chrono::milliseconds(500);
                 return;
             }
-            if (now < g_pendingAt || key == g_lastKey) return;
+            if (now < g_pendingAt || (key == g_lastKey && !g_selectionMoved)) return;
         }
 
         std::vector<std::wstring> lines;
-        if (newQuestion) {
-            lines = question;
-            g_lastQuestion = questionKey;
-        }
-        for (const auto& text : unavailable) {
-            if (std::find(lines.begin(), lines.end(), text) == lines.end()) {
-                lines.push_back(text);
+        const bool onlyValue = option.valid && (optionValueOnly || g_pendingOptionValueOnly);
+        if (onlyValue) {
+            lines.push_back(option.value);
+        } else {
+            if (newQuestion) {
+                lines = question;
+                g_lastQuestion = questionKey;
             }
+            for (const auto& text : unavailable) {
+                if (std::find(lines.begin(), lines.end(), text) == lines.end()) {
+                    lines.push_back(text);
+                }
+            }
+            const bool demonstrationScreen = isDemonstrationScreen(shown);
+            for (const auto& text : selected) {
+                // The Demonstrations heading is context for the volume and
+                // lesson rows below it, not a prefix for every announcement.
+                if (demonstrationScreen && selected.size() > 1 &&
+                    trim(text) == L"Demonstrations") {
+                    continue;
+                }
+                // On Sound/Screen Settings the title is already the screen
+                // name; do not repeat it before every row. The panel title can
+                // have a suffix, while the OPTIONS menu row behind it is just
+                // "Screen Settings", so suppress both forms.
+                if (!optionTitle.empty() && selected.size() > 1 &&
+                    (text == optionTitle || text.rfind(L"Sound Settings", 0) == 0 ||
+                     text.rfind(L"Screen Settings", 0) == 0 ||
+                     text.rfind(L"Other Settings", 0) == 0 ||
+                     text.rfind(L"Graphics Settings", 0) == 0)) {
+                    continue;
+                }
+                if (std::find(lines.begin(), lines.end(), text) == lines.end()) {
+                    lines.push_back(text);
+                }
+            }
+            for (const auto& text : blurbs) {
+                if (std::find(lines.begin(), lines.end(), text) == lines.end()) {
+                    lines.push_back(text);
+                }
+            }
+            if (!footerText.empty() && footerText != g_lastFooter) lines.push_back(footerText);
         }
-        for (const auto& text : selected) {
-            if (std::find(lines.begin(), lines.end(), text) == lines.end()) lines.push_back(text);
-        }
-        for (const auto& text : blurbs) {
-            if (std::find(lines.begin(), lines.end(), text) == lines.end()) lines.push_back(text);
-        }
-        if (!footerText.empty() && footerText != g_lastFooter) lines.push_back(footerText);
-        const bool repeated = !storyRestored && recentlySaid(lines);
+        const bool repeated = !storyRestored && !g_selectionMoved && recentlySaid(lines);
         if (!repeated) say(lines, true);
         if (controllerSetting && selectedField) {
             g_lastControllerX = selectedField->x;
@@ -2044,6 +2592,9 @@ void poll(std::vector<Field> shown) {
         if (repeated) return;
         g_pendingTexts.clear();
         g_lastKey = key;
+        g_lastSpokenSelection = join(selected);
+        g_selectionMoved = false;
+        g_pendingOptionValueOnly = false;
         g_lastFooter = footerText;
         if (g_config.logFields) {
             for (const auto& field : shown) {
@@ -2075,7 +2626,8 @@ void poll(std::vector<Field> shown) {
         if (!g_config.readBlurbs && arcadePath && isArcadePathBlurb(field)) continue;
         if (controllerSetting &&
             (trim(field.text) == L"Controller Setting" ||
-             trim(field.text) == L"Controller Settings")) {
+             trim(field.text) == L"Controller Settings" ||
+             trim(field.text) == L"Controller")) {
             continue;
         }
         if (versusMode && trim(field.text) == L"Controller Settings") continue;
@@ -2302,7 +2854,7 @@ void start() {
     g_config = loadConfig();
     g_enabled = g_config.enabled;
 
-    speech::init(g_config.rate);
+    speech::init(g_config.rate, g_config.speechBackend);
 
     g_base = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
     g_reader = Reader(g_base);
